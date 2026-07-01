@@ -9,6 +9,7 @@
   import Button from '$lib/components/panel/Button.svelte';
   import SegmentedToggle from '$lib/components/panel/SegmentedToggle.svelte';
   import WindowControls from '$lib/components/WindowControls.svelte';
+  import { isMacOS } from '$lib/platform';
   import ConnectionStatusBox from '$lib/components/ConnectionStatusBox.svelte';
   import ArmingIndicator from '$lib/components/ArmingIndicator.svelte';
   import BatteryIndicator from '$lib/components/BatteryIndicator.svelte';
@@ -136,6 +137,10 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <header class="toolbar" data-tauri-drag-region ondblclick={onTitlebarDblClick}>
+  {#if isMacOS}
+    <!-- macOS: window controls live at top-left (native traffic-light placement). -->
+    <WindowControls />
+  {/if}
   <div class="toolbar-left" data-tauri-drag-region>
     <img class="logo" src="/branding/kitegc-wordmark-white.svg" alt={$t('app.brand')} draggable="false" data-tauri-drag-region />
     <span class="version" data-tauri-drag-region>v{appVersion}</span>
@@ -268,7 +273,9 @@
     >
       ⇅ {$t('relay.short')}
     </button>
-    <WindowControls />
+    {#if !isMacOS}
+      <WindowControls />
+    {/if}
   </div>
 </header>
 

@@ -6,6 +6,7 @@
 <script lang="ts">
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { t } from 'svelte-i18n';
+  import { isMacOS } from '$lib/platform';
 
   // Track the maximized state so the middle button can switch between
   // "maximize" and "restore" glyphs. onResized fires on maximize/unmaximize/resize.
@@ -25,6 +26,19 @@
   const close = () => getCurrentWindow().close();
 </script>
 
+{#if isMacOS}
+  <!-- macOS: traffic-light dots on the LEFT, native order close · minimize · zoom (red/yellow/green). -->
+  <div class="mac-controls">
+    <button class="mac-dot mac-close" onclick={close} title={$t('window.close')} aria-label={$t('window.close')}></button>
+    <button class="mac-dot mac-min" onclick={minimize} title={$t('window.minimize')} aria-label={$t('window.minimize')}></button>
+    <button
+      class="mac-dot mac-zoom"
+      onclick={toggleMaximize}
+      title={isMaximized ? $t('window.restore') : $t('window.maximize')}
+      aria-label={isMaximized ? $t('window.restore') : $t('window.maximize')}
+    ></button>
+  </div>
+{:else}
 <div class="window-controls">
   <button class="win-btn" onclick={minimize} title={$t('window.minimize')} aria-label={$t('window.minimize')}>
     <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
@@ -57,6 +71,7 @@
     </svg>
   </button>
 </div>
+{/if}
 
 <style>
   .window-controls {
@@ -98,5 +113,44 @@
 
   .win-close:active {
     background: #a30000;
+  }
+
+  /* macOS traffic-light cluster, mirroring the native top-left placement + colours. */
+  .mac-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 100%;
+    padding: 0 14px 0 12px;
+  }
+
+  .mac-dot {
+    width: 12px;
+    height: 12px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    /* Non-drag hit target inside the draggable titlebar. */
+    -webkit-app-region: no-drag;
+    transition: filter 0.12s ease;
+  }
+
+  .mac-close {
+    background: #ff5f57;
+  }
+  .mac-min {
+    background: #febc2e;
+  }
+  .mac-zoom {
+    background: #28c840;
+  }
+
+  /* Dim slightly until the window/titlebar is hovered — matches macOS idle traffic lights. */
+  .mac-dot:hover {
+    filter: brightness(1.1);
+  }
+  .mac-dot:active {
+    filter: brightness(0.85);
   }
 </style>

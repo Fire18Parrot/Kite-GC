@@ -17,6 +17,8 @@
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 pub mod profiles;
 #[cfg(target_os = "windows")]
 mod windows;
@@ -122,6 +124,10 @@ fn make_backend() -> Box<dyn HidBackend> {
     #[cfg(target_os = "linux")]
     {
         return Box::new(linux::EvdevBackend::new());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return Box::new(macos::IOKitBackend::new());
     }
     #[allow(unreachable_code)]
     {

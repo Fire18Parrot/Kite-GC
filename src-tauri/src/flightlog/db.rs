@@ -145,6 +145,16 @@ pub fn resolve_db_path(custom_path: &str, portable: bool) -> PathBuf {
                 .join("flights.db");
         }
     }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("kite-gc")
+                .join("flights.db");
+        }
+    }
 
     // Fallback: current directory
     PathBuf::from("flights.db")

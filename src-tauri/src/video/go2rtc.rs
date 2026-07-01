@@ -93,6 +93,14 @@ fn release_asset_name() -> Option<&'static str> {
             "aarch64" => Some("go2rtc_linux_arm64"),
             _ => None,
         }
+    } else if cfg!(target_os = "macos") {
+        // macOS assets are zips (like Windows) with a bare `go2rtc` binary inside — the
+        // download()/extract_from_zip path handles the unzip + chmod automatically.
+        match std::env::consts::ARCH {
+            "x86_64" => Some("go2rtc_mac_amd64.zip"),
+            "aarch64" => Some("go2rtc_mac_arm64.zip"),
+            _ => None,
+        }
     } else {
         None
     }
@@ -108,7 +116,7 @@ fn manual_install_msg() -> String {
     )
 }
 
-/// Download go2rtc into the app-data `bin/` dir (Windows + Linux x86_64/arm64). Returns the path.
+/// Download go2rtc into the app-data `bin/` dir (Windows + Linux x86_64/arm64 + macOS). Returns the path.
 pub async fn download<F: FnMut(u8, &str)>(mut report: F) -> Result<PathBuf, String> {
     let asset_name = release_asset_name().ok_or_else(manual_install_msg)?;
 

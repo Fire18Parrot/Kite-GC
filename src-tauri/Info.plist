@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS-only Info.plist keys merged into the generated bundle by tauri-bundler.
+  Required so CoreBluetooth (btleplug BLE transport) is permitted: without a usage string modern
+  macOS denies Bluetooth central access. Mirrors the BLE capability Windows/Linux already have.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Kite Ground Control uses Bluetooth to connect to your flight controller / telemetry link over BLE.</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>Kite Ground Control uses Bluetooth to connect to your flight controller / telemetry link over BLE.</string>
+</dict>
+</plist>

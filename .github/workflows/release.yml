@@ -46,6 +46,40 @@ jobs:
             src-tauri/target/release/kite-gc.exe
             src-tauri/target/release/bundle/nsis/*-setup.exe
 
+  # Universal macOS build (arm64 + x86_64 in one .app/.dmg) so a single download runs on both Apple
+  # Silicon and Intel Macs. Built UNSIGNED on purpose: no Apple Developer credentials are placed on CI
+  # (they stay on the maintainer's machine — see `just notarize-macos` for the local sign+notarize
+  # step). An unsigned download is Gatekeeper-quarantined: first launch is right-click -> Open, or run
+  # `xattr -dr com.apple.quarantine "/Applications/Kite Ground Control.app"`.
+  macos:
+    name: Build (macOS universal · unsigned)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Fetch bundled ffmpeg (arm64 + x86_64 → universal sidecar)
+        run: bash scripts/fetch-ffmpeg-macos.sh
+      - name: Build Tauri bundle (universal)
+        run: npm run tauri build -- --target universal-apple-darwin --bundles app dmg
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: kite-gc-macos-universal
+          if-no-files-found: error
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+
   linux:
     name: Build (Linux · ubuntu-22.04)
     runs-on: ubuntu-22.04
