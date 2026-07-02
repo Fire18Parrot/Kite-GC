@@ -202,9 +202,10 @@
         + `<input type="number" data-field="alt" value="${wp.alt}" step="1" min="0"/>`
         + `<button class="wpe-num-btn" data-numdir="1">+</button></div>`
         + `<button data-field="frameToggle" class="wpe-toggle">${frameLabel(wp.frame)}</button></div>`;
-      // Takeoff coords are hidden when connected (it takes off from the FC home), but editable offline
-      // so the operator can place it precisely (drag on the map or type here).
-      if (!def.isTakeoff || !connected) {
+      // Takeoff coords are hidden only for a connected coordinate-less "take off in place" (it uses the
+      // FC home); shown when the takeoff has a real coordinate (PX4 / fixed-wing) or while planning
+      // offline, so the operator can place it precisely (drag on the map or type here).
+      if (!def.isTakeoff || wp.lat !== 0 || wp.lon !== 0 || !connected) {
         const latDeg = (wp.lat / 1e7).toFixed(7);
         const lonDeg = (wp.lon / 1e7).toFixed(7);
         html += `<div class="wpe-row"><label>${$t('missionLayer.lat')}</label><input type="number" data-field="lat" value="${latDeg}" step="0.0000001" min="-90" max="90" class="wpe-coord-input"/></div>`;
@@ -384,12 +385,13 @@
     return n > 0 ? L.latLng(sumLat / n, sumLon / n) : null;
   }
 
-  function wpDisplayLatLng(wp: ArduWaypoint, wps: ArduWaypoint[], home: HomePosition, conn: boolean): L.LatLng | null {
+  function wpDisplayLatLng(wp: ArduWaypoint, wps: ArduWaypoint[], home: HomePosition): L.LatLng | null {
     if (cmdIsTakeoff(wp.command)) {
-      // Offline the operator may position the takeoff freely (stored coords win) so it stays out of the
-      // way — also the correct target for PX4 / ArduPlane takeoff. With a UAV connected the real takeoff
-      // is the FC home, so anchor there and lock it (mirrors the "locked when connected" mission rule).
-      if (!conn && (wp.lat !== 0 || wp.lon !== 0)) return L.latLng(wp.lat / 1e7, wp.lon / 1e7);
+      // A takeoff that carries a real coordinate (PX4 / fixed-wing climb-out target — like QGC) is shown
+      // at that coordinate, connected or not. Only a coordinate-less "take off in place" (Copter, 0/0)
+      // has no position of its own, so it anchors to the FC home (or, offline, the mission centroid) so
+      // it still appears on the map.
+      if (wp.lat !== 0 || wp.lon !== 0) return L.latLng(wp.lat / 1e7, wp.lon / 1e7);
       return resolveTakeoffLatLng(wps, home);
     }
     return L.latLng(wp.lat / 1e7, wp.lon / 1e7);
@@ -448,14 +450,15 @@
 
       if (hasLoc || standalone) {
         const isTakeoff = cmdIsTakeoff(wp.command);
-        const latLng = wpDisplayLatLng(wp, wps, home, conn);
+        const latLng = wpDisplayLatLng(wp, wps, home);
         if (!latLng) continue;
 
         if (hasLoc) { fpPositions.push(latLng); fpWpIndices.push(i); }
 
-        // Takeoff is draggable too while planning offline (a connected UAV locks it to its FC home).
+        // A takeoff is draggable when it has its own coordinate (PX4 / fixed-wing) or while planning
+        // offline; a connected coordinate-less "take off in place" is anchored to home and locked.
         // Non-interactive while the pattern generator is open.
-        const draggable = editing && !patternActive && (!isTakeoff || !conn);
+        const draggable = editing && !patternActive && (!isTakeoff || wp.lat !== 0 || wp.lon !== 0 || !conn);
         const inSel = currentSelSet.has(i); // any selected → red icon (matches the INAV layer)
         const marker = L.marker(latLng, {
           icon: iconForArduWp(wp, displayNum, inSel, activeWp > 0 && displayNum === activeWp),
@@ -518,8 +521,8 @@
         const prevLocIdx = findPrevLocationIdx(wps, i);
         const sourceWp = prevLocIdx >= 0 ? wps[prevLocIdx] : null;
         const targetWp = targetLocIdx >= 0 ? wps[targetLocIdx] : null;
-        const src = sourceWp ? wpDisplayLatLng(sourceWp, wps, home, conn) : null;
-        const dst = targetWp ? wpDisplayLatLng(targetWp, wps, home, conn) : null;
+        const src = sourceWp ? wpDisplayLatLng(sourceWp, wps, home) : null;
+        const dst = targetWp ? wpDisplayLatLng(targetWp, wps, home) : null;
         if (src && dst) {
           const repeat = wp.param2 < 0 ? '∞' : wp.param2;
           const label = wp.command === CMD.DO_JUMP
@@ -576,7 +579,7 @@
 
     // Editor popup for the selected group (anchored on its primary waypoint) — shared framework with
     // the content-signature redraw guard, so live redraws don't close an open dropdown.
-    const anchorLatLng = editing && selGroup?.anchor ? wpDisplayLatLng(selGroup.anchor, wps, home, conn) : null;
+    const anchorLatLng = editing && selGroup?.anchor ? wpDisplayLatLng(selGroup.anchor, wps, home) : null;
     if (editing && !patternActive && selGroup?.anchor && anchorLatLng) {
       const g = selGroup;
       renderEditorPopup(

@@ -3735,10 +3735,10 @@
 
   function arduWpLatLon3d(wp: ArduWaypoint, wps: ArduWaypoint[]): { lat: number; lon: number } | null {
     if (cmdIsTakeoff(wp.command)) {
-      // Offline the operator can position the takeoff freely (stored coords win) — mirror the 2D layer.
-      // Connected, it anchors on the FC home (real takeoff point). See ArduMissionLayer.wpDisplayLatLng.
-      const conn = get(connection).status === 'connected';
-      if (!conn && !(wp.lat === 0 && wp.lon === 0)) return { lat: wp.lat / 1e7, lon: wp.lon / 1e7 };
+      // A takeoff with a real coordinate (PX4 / fixed-wing climb-out target) is shown at that coordinate,
+      // connected or not — mirror the 2D layer (ArduMissionLayer.wpDisplayLatLng). A coordinate-less
+      // "take off in place" (Copter, 0/0) anchors on the FC home, else the mission centroid.
+      if (wp.lat !== 0 || wp.lon !== 0) return { lat: wp.lat / 1e7, lon: wp.lon / 1e7 };
       return arduTakeoffLatLon3d(wps);
     }
     if (wp.lat === 0 && wp.lon === 0) return null;
