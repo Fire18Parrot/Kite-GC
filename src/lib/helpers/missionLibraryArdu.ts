@@ -18,7 +18,8 @@ import {
   type ArduWaypoint,
 } from '$lib/stores/missionArdupilot';
 import { sha256Hex, type MissionStats } from './missionLibrary';
-import { computeRouteStats, type RoutePoint } from './missionStats';
+import { computeRouteStats, simulateRoute, type RouteCommand } from './missionStats';
+import { CMD } from '$lib/helpers/arduCommandCatalog';
 import { missionDbFindByHash } from '$lib/stores/flightlog';
 
 const EARTH_R = 6371000;
@@ -123,20 +124,37 @@ export function computeArduMissionMetadata(wps: ArduWaypoint[]): ArduMissionMeta
  *  with none set the time stays `null` (we don't guess). A `NAV_LOITER_UNLIM` makes the time a lower
  *  bound (≥). Only flight-path nodes (commands that specify a coordinate) count toward distance. */
 export function computeArduMissionStats(wps: ArduWaypoint[]): MissionStats {
+  // JUMP_TAG id → its item index, so a DO_JUMP_TAG can resolve to a redirect target.
+  const tagIndex = new Map<number, number>();
+  wps.forEach((w, i) => { if (w.command === CMD.JUMP_TAG) tagIndex.set(Math.round(w.param1), i); });
+
+  // Executable command list in mission-item order: geo nodes carry the forward cruise speed
+  // (DO_CHANGE_SPEED air/groundspeed); DO_JUMP (param1 = target seq 1-based → index param1-1) and
+  // DO_JUMP_TAG (param1 = tag id → the tag's index) become redirects (param2 = num_times, -1 = infinite).
+  // simulateRoute then expands them into the real flown path (cross-jumps + repeats counted).
   let curSpeedMs: number | null = null;
   let hasUnlimitedHold = false;
-  const points: RoutePoint[] = [];
-  for (const w of wps) {
+  const cmds: RouteCommand[] = wps.map((w) => {
     if (w.command === MAV_CMD_DO_CHANGE_SPEED) {
       // param1: speed type (0 airspeed, 1 groundspeed, 2 climb, 3 descent); param2: speed m/s (-1 = no change).
       if ((w.param1 === 0 || w.param1 === 1) && w.param2 > 0) curSpeedMs = w.param2;
-      continue;
+      return { point: null, jump: null };
     }
     if (w.command === MAV_CMD_NAV_LOITER_UNLIM) hasUnlimitedHold = true;
-    if (!arduHasLocation(w.command)) continue;
-    points.push({ lat: w.lat / 1e7, lon: w.lon / 1e7, altM: w.alt, legSpeedMs: curSpeedMs });
-  }
-  const s = computeRouteStats(points);
+    if (w.command === CMD.DO_JUMP) {
+      return { point: null, jump: { targetIndex: Math.round(w.param1) - 1, repeats: Math.round(w.param2) } };
+    }
+    if (w.command === CMD.DO_JUMP_TAG) {
+      return { point: null, jump: { targetIndex: tagIndex.get(Math.round(w.param1)) ?? -1, repeats: Math.round(w.param2) } };
+    }
+    if (arduHasLocation(w.command)) {
+      return { point: { lat: w.lat / 1e7, lon: w.lon / 1e7, altM: w.alt, legSpeedMs: curSpeedMs }, jump: null };
+    }
+    return { point: null, jump: null };
+  });
+  const sim = simulateRoute(cmds);
+
+  const s = computeRouteStats(sim.points);
   return {
     geoCount: s.geoCount,
     legDistanceM: s.legDistanceM,
@@ -144,6 +162,7 @@ export function computeArduMissionStats(wps: ArduWaypoint[]): MissionStats {
     descentM: s.descentM,
     estTimeS: s.timeS,
     hasUnlimitedHold,
+    hasInfiniteJump: sim.hasInfiniteJump,
   };
 }
 

@@ -775,19 +775,25 @@ export async function missionFcInfo(): Promise<MissionInfo> {
   return invoke<MissionInfo>('mission_fc_info');
 }
 
-/** Waypoint-download progress emitted by the backend during an FC download (MSP + MAVLink). */
-export interface MissionDownloadProgress {
+/** Waypoint-transfer progress emitted by the backend during an FC download/upload (MSP + MAVLink). */
+export interface MissionTransferProgress {
   current: number;
   total: number;
 }
 
 /**
- * Subscribe to FC waypoint-download progress (`mission-download-progress`), for an "x of n" indicator.
+ * Subscribe to FC waypoint-DOWNLOAD progress (`mission-download-progress`), for an "x of n" indicator.
  * Returns the unlisten fn — call it once the download settles (in a `finally`). Shared by the INAV and
  * ArduPilot mission panels (both backends emit the same event).
  */
-export function onMissionDownloadProgress(cb: (p: MissionDownloadProgress) => void): Promise<() => void> {
-  return listen<MissionDownloadProgress>('mission-download-progress', (e) => cb(e.payload));
+export function onMissionDownloadProgress(cb: (p: MissionTransferProgress) => void): Promise<() => void> {
+  return listen<MissionTransferProgress>('mission-download-progress', (e) => cb(e.payload));
+}
+
+/** Subscribe to FC waypoint-UPLOAD progress (`mission-upload-progress`) — same shape and usage as the
+ *  download counter, for an "x of n" indicator while sending a mission (MSP single/multi + MAVLink). */
+export function onMissionUploadProgress(cb: (p: MissionTransferProgress) => void): Promise<() => void> {
+  return listen<MissionTransferProgress>('mission-upload-progress', (e) => cb(e.payload));
 }
 
 /** Upload mission(s) to the FC. All mission slots are sent as one INAV multi-mission (concatenated +

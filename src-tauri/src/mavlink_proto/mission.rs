@@ -141,8 +141,13 @@ pub fn upload(
     waypoints: &[ArduWaypoint],
     reserve_home: bool,
     mission_type: MavMissionType,
+    mut progress: impl FnMut(u16, u16),
 ) -> Result<(), String> {
     let rx = register(cmd_tx)?;
+    // Progress is reported in real-waypoint terms (the home slot, seq 0 when reserve_home, is excluded),
+    // mirroring `download`. `|_, _| {}` is passed when no reporting is wanted (fence/rally).
+    let progress_total = waypoints.len() as u16;
+    progress(0, progress_total);
     // ArduPilot reserves mission slot 0 for home, so the wire count is waypoints + 1: seq 0 is a
     // home placeholder and the operator's waypoints follow at seq 1.. (download dropped slot 0). PX4
     // has no home slot: the waypoints map straight to seq 0..len.
@@ -178,6 +183,7 @@ pub fn upload(
                     unregister(cmd_tx);
                     return Err(e);
                 }
+                progress((req.seq + 1).saturating_sub(reserve_home as u16), progress_total);
             }
             Ok(MavMessage::MISSION_REQUEST(req)) => {
                 // Deprecated float-coordinate request — still answer with MISSION_ITEM_INT (the FC
@@ -187,6 +193,7 @@ pub fn upload(
                     unregister(cmd_tx);
                     return Err(e);
                 }
+                progress((req.seq + 1).saturating_sub(reserve_home as u16), progress_total);
             }
             Ok(MavMessage::MISSION_ACK(ack)) => {
                 unregister(cmd_tx);

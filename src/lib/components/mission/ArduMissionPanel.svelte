@@ -24,7 +24,7 @@
     serializeWaypoints, parseWaypoints,
     type ArduWaypoint,
   } from '$lib/stores/missionArdupilot';
-  import { onMissionDownloadProgress } from '$lib/stores/mission';
+  import { onMissionDownloadProgress, onMissionUploadProgress } from '$lib/stores/mission';
   import { cmdName, cmdShort, cmdHasLocation, cmdDef, cmdValidForVehicle, cmdValidForPx4, enumLabel, type VehicleClass } from '$lib/helpers/arduCommandCatalog';
   import { buildArduWaypointMenu } from '$lib/helpers/arduWaypointMenu';
   import { contextMenu } from '$lib/actions/contextMenu';
@@ -315,13 +315,19 @@
     const wps = get(arduMission);
     if (wps.length === 0) { statusMessage = $t('mission.noWpToUpload'); return; }
     statusMessage = $t('arduMission.uploading');
+    // Live "x of n" status as the FC pulls each item (mirrors the download counter).
+    const un = await onMissionUploadProgress(({ current, total }) => {
+      statusMessage = total > 0
+        ? $t('mission.uploadingProgress', { values: { current, total } })
+        : $t('arduMission.uploading');
+    });
     try {
       await invoke<void>('ardu_mission_upload', { waypoints: wps });
       markArduMissionSynced('fc', wps); // FC now holds exactly this mission
       statusMessage = $t('mission.uploaded', { values: { count: wps.length } });
     } catch (e) {
       statusMessage = $t('mission.uploadFailed', { values: { error: String(e) } });
-    }
+    } finally { un(); }
   }
 
   // INAV-style grouped list: each location (NAV) command is a primary row; its trailing non-location
@@ -508,6 +514,7 @@
     {#if stats.geoCount >= 2}
       <div class="mission-stats">
         <span class="stat" title={$t('mission.statDistance')}>⤢ {fmtDist(stats.legDistanceM)}</span>
+        {#if stats.hasInfiniteJump}<span class="stat" title={$t('mission.infiniteRepeatTip')}>↻∞</span>{/if}
         <span class="stat" title={$t('mission.statClimbDescent')}>↑{fmtAltDelta(stats.climbM)} ↓{fmtAltDelta(stats.descentM)}</span>
         {#if estTimeText}
           <span class="stat" title={$t('mission.statTime')}>⏱ {estTimeText}</span>

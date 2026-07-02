@@ -11,7 +11,7 @@ import { get } from 'svelte/store';
 import { hashWaypoints, hasLocation, toDeg, altToM, WpAction, launchPoint, type Waypoint } from '$lib/stores/mission';
 import type { LibraryMissionInput } from '$lib/stores/flightlogTypes';
 import { missionDbFindByHash } from '$lib/stores/flightlog';
-import { computeRouteStats, type RoutePoint } from '$lib/helpers/missionStats';
+import { computeRouteStats, simulateRoute, type RouteCommand } from '$lib/helpers/missionStats';
 
 const EARTH_R = 6371000;
 const D2R = Math.PI / 180;
@@ -123,26 +123,40 @@ export interface MissionStats {
   estTimeS: number | null;
   /** A PosHold-∞ is present → the real flight time is unbounded (the value is a lower bound). */
   hasUnlimitedHold: boolean;
+  /** An infinite JUMP loop is present → distance/time are one full pass; the real flight repeats forever. */
+  hasInfiniteJump: boolean;
 }
 
 /** Editor-facing mission stats: distance, climb/descent totals and (when known) the flight time.
- *  Only the active mission part counts (everything up to and including the first Land/RTH);
- *  JUMP repetition is not expanded, so loops read as a single straight-through pass. The time is
+ *  Only the active mission part counts (everything up to and including the first Land/RTH). JUMPs are
+ *  fully simulated (cross-jumps + repeat counts expanded, see `simulateRoute`), so the distance is the
+ *  real flown length; an infinite JUMP loop counts one full pass and sets `hasInfiniteJump`. The time is
  *  reported only when waypoints set an explicit cruise speed (INAV `p1`, cm/s) — see `computeRouteStats`. */
 export function computeMissionStats(wps: Waypoint[]): MissionStats {
   const endIdx = wps.findIndex((w) => w.action === WpAction.Land || w.action === WpAction.Rth);
   const active = endIdx >= 0 ? wps.slice(0, endIdx + 1) : wps;
-  const geo = active.filter((w) => hasLocation(w.action) && !(w.lat === 0 && w.lon === 0));
 
-  // Carry-forward cruise speed: a Waypoint/Land with explicit p1 (>0, cm/s) sets the speed for the leg
-  // ending at it and onward (mirrors INAV). Unset stays null → the time reads as "unknown".
+  // Executable command list in INAV WP order: geo nodes carry the forward cruise speed (a Waypoint/Land
+  // with explicit p1 (>0, cm/s) sets the leg speed from there on); a Jump is a redirect (p1 = target WP
+  // number 1-based → index p1-1, p2 = repeats, -1 = infinite). simulateRoute then expands it to the real
+  // flown path so loops and cross-jumps are counted.
   let curSpeedMs: number | null = null;
-  const points: RoutePoint[] = geo.map((w) => {
+  const cmds: RouteCommand[] = active.map((w) => {
     if ((w.action === WpAction.Waypoint || w.action === WpAction.Land) && w.p1 > 0) {
       curSpeedMs = w.p1 / 100;
     }
-    return { lat: toDeg(w.lat), lon: toDeg(w.lon), altM: altToM(w.altitude), legSpeedMs: curSpeedMs };
+    if (w.action === WpAction.Jump) {
+      return { point: null, jump: { targetIndex: Math.round(w.p1) - 1, repeats: Math.round(w.p2) } };
+    }
+    if (hasLocation(w.action) && !(w.lat === 0 && w.lon === 0)) {
+      return {
+        point: { lat: toDeg(w.lat), lon: toDeg(w.lon), altM: altToM(w.altitude), legSpeedMs: curSpeedMs },
+        jump: null,
+      };
+    }
+    return { point: null, jump: null };
   });
+  const sim = simulateRoute(cmds);
 
   let holdS = 0;
   let hasUnlimitedHold = false;
@@ -151,7 +165,7 @@ export function computeMissionStats(wps: Waypoint[]): MissionStats {
     else if (w.action === WpAction.PosholdUnlim) hasUnlimitedHold = true;
   }
 
-  const s = computeRouteStats(points, holdS);
+  const s = computeRouteStats(sim.points, holdS);
   return {
     geoCount: s.geoCount,
     legDistanceM: s.legDistanceM,
@@ -159,6 +173,7 @@ export function computeMissionStats(wps: Waypoint[]): MissionStats {
     descentM: s.descentM,
     estTimeS: s.timeS,
     hasUnlimitedHold,
+    hasInfiniteJump: sim.hasInfiniteJump,
   };
 }
 

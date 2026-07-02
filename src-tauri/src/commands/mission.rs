@@ -27,16 +27,17 @@ fn apply_alt_mode(wp: &mut Waypoint, alt_mode: Option<u8>) {
 use crate::msp::types::{MSP_WP, MSP_WP_GETINFO, MSP_WP_MISSION_LOAD, MSP_WP_MISSION_SAVE, MSP_SET_WP};
 use crate::state::{ActiveProtocol, AppState};
 
-/// Waypoint-download progress, emitted as the `mission-download-progress` event during an FC
-/// download (both MSP and MAVLink) so the Mission Manager can show an "x of n" counter.
+/// Waypoint-transfer progress, emitted as `mission-download-progress` / `mission-upload-progress`
+/// during an FC download/upload (both MSP and MAVLink) so the Mission Manager shows an "x of n"
+/// counter for each direction.
 #[derive(Clone, serde::Serialize)]
-struct MissionDownloadProgress {
+struct MissionTransferProgress {
     current: u16,
     total: u16,
 }
 
-/// Event name for `MissionDownloadProgress`.
 const MISSION_DOWNLOAD_PROGRESS: &str = "mission-download-progress";
+const MISSION_UPLOAD_PROGRESS: &str = "mission-upload-progress";
 
 /// Get the current mission snapshot
 #[tauri::command]
@@ -193,13 +194,13 @@ pub fn mission_download(
     mission.info = info.clone();
 
     let total = info.wp_count as u16;
-    let _ = app.emit(MISSION_DOWNLOAD_PROGRESS, MissionDownloadProgress { current: 0, total });
+    let _ = app.emit(MISSION_DOWNLOAD_PROGRESS, MissionTransferProgress { current: 0, total });
     for i in 1..=info.wp_count {
         let wp_payload = handle.msp_request(MSP_WP, &[i])?;
         let wp = codec::decode_wp(&wp_payload)?;
         log::debug!("MSP download WP {i}/{total}: {wp:?}");
         mission.waypoints.push(wp);
-        let _ = app.emit(MISSION_DOWNLOAD_PROGRESS, MissionDownloadProgress { current: i as u16, total });
+        let _ = app.emit(MISSION_DOWNLOAD_PROGRESS, MissionTransferProgress { current: i as u16, total });
     }
     mission.dirty = false;
     log::info!("MSP mission download complete: {} waypoints", mission.waypoints.len());
@@ -228,6 +229,7 @@ pub fn mission_fc_info(state: State<'_, AppState>) -> Result<MissionInfo, String
 #[tauri::command]
 pub async fn mission_upload(
     save_eeprom: bool,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     store: State<'_, MissionStore>,
     terrain: State<'_, TerrainProvider>,
@@ -251,11 +253,13 @@ pub async fn mission_upload(
     let total = resolved.waypoints.len();
     log::info!("MSP mission upload start: {total} waypoints, save_eeprom={save_eeprom}");
 
-    // Upload each waypoint
+    // Upload each waypoint, emitting live "x of n" progress (mirrors the download counter).
+    let _ = app.emit(MISSION_UPLOAD_PROGRESS, MissionTransferProgress { current: 0, total: total as u16 });
     for (i, wp) in resolved.waypoints.iter().enumerate() {
         log::debug!("MSP upload WP {}/{}: {wp:?}", i + 1, total);
         let payload = codec::encode_wp(wp);
         handle.msp_request(MSP_SET_WP, &payload)?;
+        let _ = app.emit(MISSION_UPLOAD_PROGRESS, MissionTransferProgress { current: (i + 1) as u16, total: total as u16 });
     }
 
     // Optional: save to EEPROM (mission ID byte reserved → 0).
@@ -315,6 +319,7 @@ fn assemble_multi_mission(missions: &[Vec<Waypoint>]) -> Vec<Waypoint> {
 pub async fn mission_upload_multi(
     missions: Vec<Vec<Waypoint>>,
     save_eeprom: bool,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     store: State<'_, MissionStore>,
     terrain: State<'_, TerrainProvider>,
@@ -341,9 +346,11 @@ pub async fn mission_upload_multi(
         "MSP multi-mission upload start: {} mission(s), {total} waypoints, save_eeprom={save_eeprom}",
         missions.iter().filter(|m| !m.is_empty()).count()
     );
+    let _ = app.emit(MISSION_UPLOAD_PROGRESS, MissionTransferProgress { current: 0, total: total as u16 });
     for (i, wp) in resolved.waypoints.iter().enumerate() {
         log::debug!("MSP upload WP {}/{}: {wp:?}", i + 1, total);
         handle.msp_request(MSP_SET_WP, &codec::encode_wp(wp))?;
+        let _ = app.emit(MISSION_UPLOAD_PROGRESS, MissionTransferProgress { current: (i + 1) as u16, total: total as u16 });
     }
 
     // Optional: save to EEPROM (mission ID byte reserved → 0).
@@ -494,7 +501,7 @@ pub fn ardu_mission_download(app: tauri::AppHandle, state: State<'_, AppState>) 
         reserve_home,
         ::mavlink::ardupilotmega::MavMissionType::MAV_MISSION_TYPE_MISSION,
         |current, total| {
-            let _ = app.emit(MISSION_DOWNLOAD_PROGRESS, MissionDownloadProgress { current, total });
+            let _ = app.emit(MISSION_DOWNLOAD_PROGRESS, MissionTransferProgress { current, total });
         },
     )
 }
@@ -505,6 +512,7 @@ pub fn ardu_mission_download(app: tauri::AppHandle, state: State<'_, AppState>) 
 #[tauri::command(async)]
 pub fn ardu_mission_upload(
     waypoints: Vec<ArduWaypoint>,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     if waypoints.is_empty() {
@@ -520,7 +528,16 @@ pub fn ardu_mission_upload(
             None => return Err("Not connected".into()),
         }
     };
-    mavlink_proto::mission::upload(&cmd_tx, fc_sysid, &waypoints, reserve_home, ::mavlink::ardupilotmega::MavMissionType::MAV_MISSION_TYPE_MISSION)
+    mavlink_proto::mission::upload(
+        &cmd_tx,
+        fc_sysid,
+        &waypoints,
+        reserve_home,
+        ::mavlink::ardupilotmega::MavMissionType::MAV_MISSION_TYPE_MISSION,
+        |current, total| {
+            let _ = app.emit(MISSION_UPLOAD_PROGRESS, MissionTransferProgress { current, total });
+        },
+    )
 }
 
 /// Read a text file from disk (used for .waypoints and similar formats)

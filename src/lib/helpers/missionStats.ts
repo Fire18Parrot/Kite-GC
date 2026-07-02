@@ -30,6 +30,57 @@ export interface RoutePoint {
   legSpeedMs: number | null;
 }
 
+/** One executable mission step for the jump simulator: a flight-path node, a jump redirect, or
+ *  neither (a modifier / non-geo command). A jump's `targetIndex` points into the SAME command array
+ *  (the per-stack adapter maps its target WP number / tag to an index). */
+export interface RouteCommand {
+  point: RoutePoint | null;
+  jump: { targetIndex: number; repeats: number } | null;
+}
+
+export interface SimulatedRoute {
+  /** Flight-path nodes actually flown, with jumps expanded (cross-jump legs included). */
+  points: RoutePoint[];
+  /** An infinite jump (repeats < 0) was present — the route is one pass plus a "repeats forever" hint. */
+  hasInfiniteJump: boolean;
+  /** The step cap was hit (a pathological config) — the returned points are a partial traversal. */
+  truncated: boolean;
+}
+
+/**
+ * Walk a mission's commands, following JUMP redirects, to produce the ordered flight-path nodes actually
+ * flown — so route stats reflect the real distance/time including cross-jumps and repeat counts.
+ *
+ * Finite jump counters do NOT reset once exhausted (matches ArduPilot/INAV: DO_JUMP / NAV jump counters
+ * are one-shot, so nested loops don't multiply). An infinite jump (repeats < 0) is NOT taken — the route
+ * is traversed once and the jump is only flagged, giving "one full pass + repeats-forever hint" rather
+ * than an unbounded length. A hard step cap guards against pathological configs.
+ */
+export function simulateRoute(cmds: RouteCommand[], maxSteps = 50000): SimulatedRoute {
+  const points: RoutePoint[] = [];
+  const finiteRemaining = new Map<number, number>(); // jump index → remaining finite repeats
+  let hasInfiniteJump = false;
+  let truncated = false;
+  let pc = 0;
+  let steps = 0;
+
+  while (pc >= 0 && pc < cmds.length) {
+    if (++steps > maxSteps) { truncated = true; break; }
+    const c = cmds[pc];
+    if (c.point) { points.push(c.point); pc++; continue; }
+    if (c.jump && c.jump.targetIndex >= 0 && c.jump.targetIndex < cmds.length) {
+      const { targetIndex, repeats } = c.jump;
+      if (repeats < 0) { hasInfiniteJump = true; pc++; continue; } // infinite → count one pass, just flag
+      let rem = finiteRemaining.get(pc);
+      if (rem === undefined) rem = repeats;
+      if (rem > 0) { finiteRemaining.set(pc, rem - 1); pc = targetIndex; continue; }
+      finiteRemaining.set(pc, 0); pc++; continue;
+    }
+    pc++; // modifier / non-geo / invalid jump target → skip
+  }
+  return { points, hasInfiniteJump, truncated };
+}
+
 export interface RouteStats {
   /** Number of flight-path nodes. */
   geoCount: number;

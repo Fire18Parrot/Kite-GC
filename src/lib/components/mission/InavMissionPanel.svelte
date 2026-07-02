@@ -24,7 +24,7 @@
     type Waypoint, type Mission, WpAction, WP_ACTION_KEYS,
     hasLocation, isModifier, missionFlags, missionModified,
     loadedMissionId, markMissionSynced,
-    onMissionDownloadProgress,
+    onMissionDownloadProgress, onMissionUploadProgress,
   } from '$lib/stores/mission';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import MissionSaveDialog from '$lib/components/mission/MissionSaveDialog.svelte';
@@ -147,6 +147,15 @@
     });
   }
 
+  // Live "x of n" status while the mission is sent to the FC (mirrors the download counter).
+  function listenUploadProgress() {
+    return onMissionUploadProgress(({ current, total }) => {
+      statusMessage = total > 0
+        ? $t('mission.uploadingProgress', { values: { current, total } })
+        : $t('mission.uploading');
+    });
+  }
+
   async function handleDownload() {
     if (!isConnected()) { statusMessage = $t('mission.notConnected'); return; }
     downloadLoading = true; statusMessage = $t('mission.downloading');
@@ -161,24 +170,26 @@
 
   async function handleUpload() {
     if (!isConnected()) { statusMessage = $t('mission.notConnected'); return; }
-    uploadLoading = true; statusMessage = '';
+    uploadLoading = true; statusMessage = $t('mission.uploading');
+    const un = await listenUploadProgress();
     try {
       const m = await missionUpload(false);
       statusMessage = $t('mission.uploaded', { values: { count: m.waypoints.length } });
     } catch (e) {
       statusMessage = $t('mission.uploadFailed', { values: { error: String(e) } });
-    } finally { uploadLoading = false; }
+    } finally { un(); uploadLoading = false; }
   }
 
   async function handleEepromSave() {
     if (!isConnected() || isArmed()) { statusMessage = isArmed() ? $t('mission.eepromSaveArmedMsg') : $t('mission.notConnected'); return; }
-    eepromSaveLoading = true; statusMessage = '';
+    eepromSaveLoading = true; statusMessage = $t('mission.uploading');
+    const un = await listenUploadProgress();
     try {
       const m = await missionUpload(true);
       statusMessage = $t('mission.eepromSaved', { values: { count: m.waypoints.length } });
     } catch (e) {
       statusMessage = $t('mission.eepromSaveFailed', { values: { error: String(e) } });
-    } finally { eepromSaveLoading = false; }
+    } finally { un(); eepromSaveLoading = false; }
   }
 
   async function handleEepromLoad() {
@@ -580,6 +591,7 @@
     {#if !showPatternPanel && stats.geoCount >= 2}
       <div class="mission-stats">
         <span class="stat" title={$t('mission.statDistance')}>⤢ {fmtDist(stats.legDistanceM)}</span>
+        {#if stats.hasInfiniteJump}<span class="stat" title={$t('mission.infiniteRepeatTip')}>↻∞</span>{/if}
         <span class="stat" title={$t('mission.statClimbDescent')}>↑{fmtAltDelta(stats.climbM)} ↓{fmtAltDelta(stats.descentM)}</span>
         {#if estTimeText}
           <span class="stat" title={$t('mission.statTime')}>⏱ {estTimeText}</span>
