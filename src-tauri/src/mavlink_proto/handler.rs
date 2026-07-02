@@ -773,6 +773,10 @@ fn dispatch_message(header: &MavHeader, message: &MavMessage, fc_variant: &str, 
                 pitot: s3(Sns::MAV_SYS_STATUS_SENSOR_DIFFERENTIAL_PRESSURE),
                 opflow: s3(Sns::MAV_SYS_STATUS_SENSOR_OPTICAL_FLOW),
                 prearm,
+                // The FC's own "RC input valid" flag. ArduPilot sets RC_RECEIVER health for any live RC
+                // source, incl. a MAVLink-RC override (SIYI) with no serial RX — a far more robust
+                // "transmitter present" signal than the receiver RSSI (which such links leave at 255).
+                rc_receiver: s3(Sns::MAV_SYS_STATUS_SENSOR_RC_RECEIVER),
             };
             let _ = app_handle.emit("telemetry-sensor-status", &sensor_data);
         }

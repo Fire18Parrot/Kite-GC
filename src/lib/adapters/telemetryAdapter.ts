@@ -100,6 +100,7 @@ export function toTelemetryData(r: TelemetryRecord, fcVariant = 'INAV'): Telemet
     sensorRangefinder: 0,
     sensorPitot: 0,
     sensorOpflow: 0,
+    sensorRcReceiver: 0, // live-only (SYS_STATUS RC receiver health); not replayed from the DB
     prearmHealthy: 0,
 
     // EKF estimator — live-only (not recorded), default to hidden on replay

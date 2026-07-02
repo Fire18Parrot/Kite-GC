@@ -118,6 +118,11 @@ pub struct SensorStatusData {
     /// Pre-arm readiness (MAVLink only, from SYS_STATUS PREARM_CHECK bit): 0=unknown, 1=ready, 2=blocked.
     /// INAV leaves this 0 — it reports arming-blockers via the armingFlags bitfield instead.
     pub prearm: u8,
+    /// RC receiver health (MAVLink only, from SYS_STATUS RC_RECEIVER sensor bit): 0=none/absent,
+    /// 1=OK (live valid RC input — any source, incl. a MAVLink-RC override like SIYI), 3=unhealthy
+    /// (failsafe / stale). INAV leaves this 0 (MSP has no equivalent bit; its RC presence is handled via
+    /// MSP RC OVERRIDE). Used to unlock stick-flown modes when a real transmitter drives the FC.
+    pub rc_receiver: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -542,6 +547,7 @@ fn decode_sensor_status(payload: &[u8]) -> TelemetryPayload {
         pitot: if payload.len() > 7 { payload[7] } else { 0 },
         opflow: if payload.len() > 8 { payload[8] } else { 0 },
         prearm: 0, // INAV signals arming-blockers via armingFlags, not the sensor status
+        rc_receiver: 0, // MAVLink-only signal (SYS_STATUS); INAV RC presence is via MSP RC OVERRIDE
     })
 }
 

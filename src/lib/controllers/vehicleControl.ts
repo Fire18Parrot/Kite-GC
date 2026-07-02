@@ -81,12 +81,14 @@ export const controlAvailable: Readable<boolean> = derived(
   (c) => c.status === 'connected' && c.protocolType === 'mavlink',
 );
 
-/** Best-effort "RC transmitter present" signal. We trust a valid receiver RSSI (`link.rssiPercent`
- *  is only populated when the FC reports a real RC RSSI). Without it, stick-required modes stay
- *  locked. Provisional — a more robust RX-present signal is a tracked open question. */
+/** "RC transmitter present" signal — a real radio is driving the FC. Primary source (MAVLink) is the
+ *  FC's own RC_RECEIVER health bit from SYS_STATUS (`sensorRcReceiver === 1`): set for ANY live RC
+ *  source, including a MAVLink-RC override (e.g. SIYI) with no serial RX, so it works where the receiver
+ *  RSSI is absent (255 → `rssiPercent` null). Falls back to a reported RC RSSI (older paths / INAV).
+ *  Without either, stick-required modes stay locked. */
 export const rcLinkPresent: Readable<boolean> = derived(
   telemetry,
-  (t) => t.link.rssiPercent != null && t.link.rssiPercent > 0,
+  (t) => t.sensorRcReceiver === 1 || (t.link.rssiPercent != null && t.link.rssiPercent > 0),
 );
 
 /** Whether stick-flown modes are safe to select: there must be a usable RC source — either a physical

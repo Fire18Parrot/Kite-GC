@@ -103,6 +103,11 @@ export interface TelemetryData {
   sensorPitot: number;
   sensorOpflow: number;
 
+  /** RC receiver health (MAVLink SYS_STATUS RC_RECEIVER): 0=none, 1=OK (live valid RC input — any
+   *  source, incl. a MAVLink-RC override like SIYI), 3=unhealthy. INAV leaves this 0. Unlocks the
+   *  stick-flown modes when a real transmitter drives the FC (see rcLinkPresent). */
+  sensorRcReceiver: number;
+
   /** Pre-arm readiness (MAVLink SYS_STATUS PREARM_CHECK): 0=unknown, 1=ready, 2=blocked. INAV leaves
    *  this 0 and signals blockers via armingFlags instead. Drives the toolbar arming indicator. */
   prearmHealthy: number;
@@ -138,7 +143,7 @@ const defaultTelemetry: TelemetryData = {
   link: { rssiPercent: null, rssiDbm: null, lq: null, snrDb: null },
   armingFlags: 0, cpuLoad: 0, sensorStatus: 0, flightModeFlags: 0, mspRcOverride: false,
   sensorGyro: 0, sensorAcc: 0, sensorMag: 0, sensorBaro: 0,
-  sensorGps: 0, sensorRangefinder: 0, sensorPitot: 0, sensorOpflow: 0, prearmHealthy: 0,
+  sensorGps: 0, sensorRangefinder: 0, sensorPitot: 0, sensorOpflow: 0, sensorRcReceiver: 0, prearmHealthy: 0,
   ekfStatus: 0, ekfType: 0,
   flightMode: { primary: '', modifiers: [] }, navState: 0, activeWpNumber: 0,
   fcVariant: 'INAV',
@@ -404,6 +409,7 @@ export async function startTelemetryListeners() {
     await listen<{
       gyro: number; acc: number; mag: number; baro: number;
       gps: number; rangefinder: number; pitot: number; opflow: number; prearm: number;
+      rc_receiver: number;
     }>('telemetry-sensor-status', (event) => {
       const p = event.payload;
       telemetry.update((t) => ({
@@ -416,6 +422,7 @@ export async function startTelemetryListeners() {
         sensorRangefinder: p.rangefinder,
         sensorPitot: p.pitot,
         sensorOpflow: p.opflow,
+        sensorRcReceiver: p.rc_receiver,
         prearmHealthy: p.prearm,
         lastUpdate: Date.now(),
       }));
