@@ -38,7 +38,12 @@
   );
   let distanceText = $derived(() => {
     const converted = convertDistance(distance, interfaceSettings.distanceUnit);
-    const digits = converted.unit === 'm' || converted.unit === 'ft' ? 0 : 1;
+    // Keep a constant ~3 significant digits so the readout stays a stable width: m/ft show whole
+    // metres/feet (1–999); the large unit (km/mi) shows 2 dp below 10 (1.00–9.99), 1 dp below 100
+    // (10.0–99.9), then whole units at 100+.
+    const digits = converted.unit === 'm' || converted.unit === 'ft'
+      ? 0
+      : converted.value < 10 ? 2 : converted.value < 100 ? 1 : 0;
     return formatConverted(converted, digits);
   });
   // Arrow direction relative to aircraft heading
