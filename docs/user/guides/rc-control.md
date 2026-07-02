@@ -172,6 +172,17 @@ Kite handles for you).
 - **Modes and arming** go through the **Control** tool (`DO_SET_MODE` / arm), not the override stream —
   though you can map a flight-mode channel if you prefer.
 
+!!! warning "Don't share the channels with another MAVLink-RC system"
+    ArduPilot **cannot tell two `RC_CHANNELS_OVERRIDE` sources apart**. If a radio already feeds RC to the
+    FC over MAVLink — for example a **SIYI** air unit in MAVLink-RC mode, with no separate serial receiver
+    — do **not** also drive those channels from Kite: the two override streams collide, and **`SYSID_MYGCS`**
+    filtering may silently drop one of them. Unlike INAV there is **no separate AUX channel space** on
+    ArduPilot (it's one CH1–16 override), so there's **no clean "AUX-only" fallback** — Kite RC control and
+    another MAVLink-RC system must **not** be used together on the main channels. Use Kite RC control only
+    when the other radio is **idle / handed off**, or set up a dedicated, non-conflicting configuration
+    first — consult the **ArduPilot RC / MAVLink-override documentation** and the
+    **[RC control troubleshooting](../troubleshooting/rc-control.md)** page.
+
 ## PX4 (MAVLink)
 
 PX4 is fundamentally different: it uses **`MANUAL_CONTROL`**, which is **not** per-channel PWM but
