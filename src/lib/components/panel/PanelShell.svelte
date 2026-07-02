@@ -9,6 +9,7 @@
 
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { panelDockRight } from '$lib/stores/panelDock';
 
   // Reusable panel frame for the whole app (see docs/active/PANEL_FRAMEWORK.md). The shell owns
   // the frame, positioning, sizing per variant, the scroll/bounding of the framed field, and
@@ -53,9 +54,23 @@
     params?: Snippet;
     children?: Snippet;
   } = $props();
+
+  // Publish the panel's live right edge (viewport px, transform-aware) so frame-pinned overlays can
+  // dodge it — see stores/panelDock. ResizeObserver's initial callback fires on observe(), so a tab
+  // switch (old shell destroyed, new mounted) self-corrects even if the destroy runs last. The
+  // teardown reset to 0 covers plain close; a modal PanelShell opened over a docked one is behind its
+  // own backdrop, so the transient value is never visible.
+  let root = $state<HTMLElement>();
+  $effect(() => {
+    const el = root;
+    if (!el) return;
+    const ro = new ResizeObserver(() => panelDockRight.set(el.getBoundingClientRect().right));
+    ro.observe(el);
+    return () => { ro.disconnect(); panelDockRight.set(0); };
+  });
 </script>
 
-<div class="ps ps-{variant}">
+<div class="ps ps-{variant}" bind:this={root}>
   {#if variant === 'fullscreen' || variant === 'wide-compact'}
     <header class="ps-head">
       <span class="ps-title">{title}</span>

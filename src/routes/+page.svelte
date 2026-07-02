@@ -51,6 +51,7 @@
   import RadarAlertBanner from "$lib/components/RadarAlertBanner.svelte";
   import StatusTextToasts from "$lib/components/StatusTextToasts.svelte";
   import { startStatusText } from "$lib/stores/statusText";
+  import { panelDockRight } from "$lib/stores/panelDock";
   import SettingsPanel from "$lib/components/SettingsPanel.svelte";
   import { ensureUserLocation, requestUserLocation, userGeoLocation } from "$lib/helpers/userLocation";
   import { gcsLocation } from "$lib/stores/gcsLocation";
@@ -2475,7 +2476,10 @@
   <!-- Toasts & alerts pinned to the MAIN APP FRAME (not the map): the map can shrink into the
        floating window or a widget tile, and map-bound banners would then cover that tiny tile. This
        container sits above everything in the content area so alerts stay readable. -->
-  <div class="app-toasts">
+  <!-- --toast-dock-inset = the open left-docked panel's right edge (0 when none); the system-message
+       toasts read it to centre in the free area beside the panel (issue #10). The radar banner ignores
+       it and stays frame-centred + on top. -->
+  <div class="app-toasts" style:--toast-dock-inset="{$panelDockRight}px">
     <!-- Conflict-alert banner (renders nothing when idle). -->
     <RadarAlertBanner {interfaceSettings} />
     <!-- FC system messages (MAVLink STATUSTEXT) as top-edge toasts (renders nothing when idle). -->

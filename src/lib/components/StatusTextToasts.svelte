@@ -41,11 +41,16 @@
   .msg-banner {
     position: absolute;
     top: 56px;
-    left: 50%;
-    transform: translateX(-50%);
+    /* Centre within the area to the RIGHT of any open left-docked panel (issue #10). --toast-dock-inset
+       is the panel's viewport right edge (0 when none); left + right + margin:auto centres the
+       fixed-width banner in that band, and the max-width cap keeps it inside the band on narrow screens
+       so it can never slide back over the panel. */
+    left: calc(var(--toast-dock-inset, 0px) + 8px);
+    right: 8px;
+    margin-inline: auto;
     z-index: 480; /* below the radar conflict banner (500) */
     width: max-content;
-    max-width: min(640px, 80%);
+    max-width: min(640px, calc(100vw - var(--toast-dock-inset, 0px) - 32px));
     background: rgba(30, 30, 30, 0.82);
     backdrop-filter: blur(10px);
     border: 1px solid rgba(255, 255, 255, 0.08);
