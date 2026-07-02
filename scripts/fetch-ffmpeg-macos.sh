@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 # ============================================================
 # Kite Ground Control — fetch static macOS ffmpeg for bundling
 #
@@ -24,7 +26,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN_DIR="$ROOT/src-tauri/binaries"
-API="https://api.github.com/repos/eugeneware/ffmpeg-static/releases/latest"
+# Pinned to a specific release tag (not `latest`) so CI builds are reproducible and the bundled
+# ffmpeg binary can't change out from under us — bump this deliberately when updating ffmpeg.
+FFMPEG_STATIC_TAG="b6.1.1"
+API="https://api.github.com/repos/eugeneware/ffmpeg-static/releases/tags/${FFMPEG_STATIC_TAG}"
 
 mkdir -p "$BIN_DIR"
 
@@ -41,7 +46,7 @@ fetch_arch() {
     local url out
     url="$(asset_url "$asset")"
     if [ -z "$url" ]; then
-        echo "[fetch-ffmpeg] ERROR: no asset '$asset' in latest release ($API)"
+        echo "[fetch-ffmpeg] ERROR: no asset '$asset' in release $FFMPEG_STATIC_TAG ($API)"
         exit 1
     fi
     out="$BIN_DIR/ffmpeg-$triple"

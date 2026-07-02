@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 # ============================================================
 # Kite Ground Control — macOS sign + notarize (LOCAL ONLY)
 # Signs the built universal .app + .dmg with your Developer ID, submits the

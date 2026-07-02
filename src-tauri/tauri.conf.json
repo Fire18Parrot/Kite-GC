@@ -25,7 +25,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "deb", "appimage", "rpm", "app", "dmg"],
+    "targets": ["nsis", "deb", "appimage", "rpm"],
     "macOS": {
       "entitlements": "Entitlements.plist",
       "minimumSystemVersion": "10.15"
