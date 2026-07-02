@@ -5,9 +5,10 @@
 
 <!-- StatusTextToasts.svelte
      FC system messages (MAVLink STATUSTEXT) as a single compact banner at the top edge: one line per
-     message, colour-coded by severity, newest at the bottom; the field scrolls to the latest. The
-     whole banner fades out 60 s after the last message (the store clears the list). Verbosity is
-     controlled by settings.systemMessages; audio cue is played in the store.
+     message, colour-coded by severity, newest at the bottom; the field scrolls to the latest. Each
+     message expires individually 20 s after it arrived (the store drops lines one by one); the banner
+     disappears once the last line is gone. Verbosity is controlled by settings.systemMessages; audio
+     cue is played in the store.
 -->
 <script lang="ts">
   import { fade } from 'svelte/transition';

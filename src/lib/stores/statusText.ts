@@ -2,9 +2,9 @@
 // Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 
 // FC system messages (MAVLink STATUSTEXT) shown as top-of-screen toasts. The backend emits
-// `mavlink-statustext` ({ severity, text }); we keep the most recent few, auto-clear them 60 s after
-// the last one arrived, and play a severity-tiered audio cue. Severity is MAV_SEVERITY (0 = emergency
-// … 7 = debug).
+// `mavlink-statustext` ({ severity, text }); we keep the most recent few, expire each one 20 s after
+// it individually arrived (unless it's already slid out of the buffer), and play a severity-tiered
+// audio cue. Severity is MAV_SEVERITY (0 = emergency … 7 = debug).
 
 import { writable, get } from 'svelte/store';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -17,10 +17,11 @@ export interface StatusTextMsg {
   severity: number;      // MAV_SEVERITY 0..7
   level: StatusTextLevel; // collapsed for colour/sound
   text: string;
+  expiresAt: number;     // epoch ms when this line fades out (per-message lifetime)
 }
 
 const MAX_BUFFER = 12;          // lines kept (the banner shows a few and scrolls to the newest)
-const CLEAR_AFTER_MS = 60_000;  // fade everything out 60 s after the last message
+const CLEAR_AFTER_MS = 20_000;  // each message fades out 20 s after it individually arrived
 const SOUND_MIN_GAP_MS = 1200;  // don't let an INFO flood machine-gun the speaker
 
 /** MAV_SEVERITY → display/sound level. ≤3 ERROR/CRITICAL/ALERT/EMERGENCY, 4 WARNING, ≥5 NOTICE/INFO/DEBUG. */
@@ -67,10 +68,29 @@ function trackPrearm(text: string): void {
 }
 
 let nextId = 1;
-let clearTimer: ReturnType<typeof setTimeout> | null = null;
+let sweepTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSoundAt = 0;
 let lastText = '';
 let unlisten: UnlistenFn | null = null;
+
+/** Drop every message whose per-line lifetime has elapsed, then re-arm for the next-earliest expiry.
+ *  One timer scheduled at the soonest `expiresAt` covers the whole (small) buffer. */
+function sweepExpired(): void {
+  const now = Date.now();
+  statusTexts.update((list) => {
+    const kept = list.filter((m) => m.expiresAt > now);
+    return kept.length === list.length ? list : kept;
+  });
+  scheduleSweep();
+}
+
+function scheduleSweep(): void {
+  if (sweepTimer) { clearTimeout(sweepTimer); sweepTimer = null; }
+  const list = get(statusTexts);
+  if (!list.length) return;
+  const soonest = Math.min(...list.map((m) => m.expiresAt));
+  sweepTimer = setTimeout(sweepExpired, Math.max(0, soonest - Date.now()));
+}
 
 function push(severity: number, text: string): void {
   const clean = text.trim();
@@ -78,14 +98,17 @@ function push(severity: number, text: string): void {
   const level = statusLevel(severity);
   if (!levelAllowed(level)) return; // filtered out by the "System Messages" setting
 
+  const expiresAt = Date.now() + CLEAR_AFTER_MS;
   statusTexts.update((list) => {
-    // Light de-dup: a repeated identical line just refreshes the timer, no duplicate row.
-    if (list.length && list[list.length - 1].text === clean) return list;
-    return [...list, { id: nextId++, severity, level, text: clean }].slice(-MAX_BUFFER);
+    // Light de-dup: a repeated identical last line just refreshes its own lifetime, no duplicate row.
+    if (list.length && list[list.length - 1].text === clean) {
+      const refreshed = [...list];
+      refreshed[refreshed.length - 1] = { ...refreshed[refreshed.length - 1], expiresAt };
+      return refreshed;
+    }
+    return [...list, { id: nextId++, severity, level, text: clean, expiresAt }].slice(-MAX_BUFFER);
   });
-
-  if (clearTimer) clearTimeout(clearTimer);
-  clearTimer = setTimeout(() => statusTexts.set([]), CLEAR_AFTER_MS);
+  scheduleSweep();
 
   if (clean !== lastText || level !== 'info') playTone(level); // always cue errors; rate-limit info
   lastText = clean;
@@ -154,7 +177,7 @@ export async function startStatusText(): Promise<void> {
 export function stopStatusText(): void {
   unlisten?.();
   unlisten = null;
-  if (clearTimer) { clearTimeout(clearTimer); clearTimer = null; }
+  if (sweepTimer) { clearTimeout(sweepTimer); sweepTimer = null; }
   if (prearmTimer) { clearTimeout(prearmTimer); prearmTimer = null; }
   prearmLines = [];
   statusTexts.set([]);
