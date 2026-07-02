@@ -967,9 +967,11 @@
       // Rendering
       requestRenderMode: true,
       maximumRenderTimeChange: 0.0,
-      // No MSAA — its per-frame full-screen resolve is costly on Linux/WebKitGTK + Intel iGPU (measured
-      // ~3-4 fps). FXAA (enabled below) gives equivalent quality far cheaper.
-      msaaSamples: 0,
+      // No MSAA (its per-frame full-screen resolve is costly on Linux/WebKitGTK + Intel iGPU, ~3-4 fps).
+      // Must be 1 (the valid "off" value), NOT 0: 0 leaves Cesium's multisample framebuffer at 0 samples,
+      // which breaks the translucent render pass on some drivers — the replay track line + altitude
+      // curtain vanish while the clamp-to-ground shadow (a separate pass) stays. FXAA (below) does the AA.
+      msaaSamples: 1,
       scene3DOnly: true,
       // Debug: the Performance tab can disable OIT (a per-frame full-screen pass) via a localStorage flag
       // to measure its cost. OIT is constructor-only, so the panel reloads to apply. The key is only ever
