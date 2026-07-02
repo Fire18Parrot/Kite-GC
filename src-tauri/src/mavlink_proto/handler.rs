@@ -106,6 +106,7 @@ impl MavlinkHandle {
 pub fn start(
     transport: Box<dyn ByteTransport>,
     fc_sysid: u8,
+    fc_compid: u8,
     fc_variant: String,
     app_handle: AppHandle,
     recorder: Option<FlightRecorderHandle>,
@@ -115,7 +116,7 @@ pub fn start(
 
     let handle_variant = fc_variant.clone();
     let thread = thread::spawn(move || {
-        handler_loop(transport, fc_sysid, fc_variant, app_handle, cmd_rx, recorder, rc_tx)
+        handler_loop(transport, fc_sysid, fc_compid, fc_variant, app_handle, cmd_rx, recorder, rc_tx)
     });
 
     MavlinkHandle {
@@ -130,6 +131,7 @@ pub fn start(
 fn handler_loop(
     mut transport: Box<dyn ByteTransport>,
     fc_sysid: u8,
+    fc_compid: u8,
     fc_variant: String,
     app_handle: AppHandle,
     cmd_rx: mpsc::Receiver<MavlinkCommand>,
@@ -185,7 +187,7 @@ fn handler_loop(
     // transition rather than every loop.
     let mut rc_fast_read = false;
 
-    log::info!("MAVLink handler started (FC sysid={})", fc_sysid);
+    log::info!("MAVLink handler started (FC sysid={} compid={})", fc_sysid, fc_compid);
 
     loop {
         // 1. Check for commands (non-blocking)
@@ -375,6 +377,17 @@ fn handler_loop(
                             }
                             continue;
                         }
+                    }
+
+                    // Only the autopilot component drives mode + armed. Peripherals sharing the FC's
+                    // system_id (gimbal, companion, CAN nodes — e.g. a SIYI air unit) also emit ~1 Hz
+                    // HEARTBEATs with custom_mode=0/0xFFFF and no armed bit; dispatching those flipped
+                    // the mode to ARDU_MODE_<n> and flapped armed true/false (a spurious 1 Hz disarm →
+                    // End-Flight-popup loop). Their frames are still recorded to the tlog above; they're
+                    // just not treated as telemetry. Non-HEARTBEAT messages are unaffected (ADS-B,
+                    // gimbal feedback, etc. legitimately come from other components on the same sysid).
+                    if matches!(frame.message, MavMessage::HEARTBEAT(_)) && frame.header.component_id != fc_compid {
+                        continue;
                     }
 
                     dispatch_message(&frame.header, &frame.message, &fc_variant, &app_handle, &mut analog, &mut batteries, &mut fused, &mut quadplane_seen, &recorder);

@@ -27,10 +27,10 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// 1. Read bytes until we receive a HEARTBEAT from the FC
 /// 2. Extract FC info (autopilot type, vehicle type, system ID)
 /// 3. Send a GCS HEARTBEAT back
-/// 4. Return (FcInfo, fc_system_id)
+/// 4. Return (FcInfo, fc_system_id, fc_component_id)
 ///
 /// The transport is borrowed mutably — caller retains ownership.
-pub fn perform_handshake(transport: &mut dyn ByteTransport) -> Result<(FcInfo, u8), String> {
+pub fn perform_handshake(transport: &mut dyn ByteTransport) -> Result<(FcInfo, u8, u8), String> {
     let mut parser = MavParser::new();
     let mut buf = [0u8; 512];
     let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
@@ -53,6 +53,7 @@ pub fn perform_handshake(transport: &mut dyn ByteTransport) -> Result<(FcInfo, u
 
     // Wait for HEARTBEAT from the FC
     let fc_sysid: u8;
+    let fc_compid: u8;
     let mut fc_info = FcInfo::default();
     let mut total_bytes_read: usize = 0;
     let mut read_calls: u32 = 0;
@@ -124,6 +125,9 @@ pub fn perform_handshake(transport: &mut dyn ByteTransport) -> Result<(FcInfo, u
                         }
 
                         fc_sysid = frame.header.system_id;
+                        // Lock onto this component too — only its HEARTBEATs drive mode/armed in the
+                        // handler loop, so peripherals sharing the FC's system_id can't flip them.
+                        fc_compid = frame.header.component_id;
                         log::info!(
                             "MAVLink handshake: locked onto autopilot heartbeat (sysid={} compid={} autopilot={:?})",
                             frame.header.system_id, frame.header.component_id, hb.autopilot,
@@ -284,5 +288,5 @@ pub fn perform_handshake(transport: &mut dyn ByteTransport) -> Result<(FcInfo, u
         }
     }
 
-    Ok((fc_info, fc_sysid))
+    Ok((fc_info, fc_sysid, fc_compid))
 }

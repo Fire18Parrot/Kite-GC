@@ -538,7 +538,7 @@ fn connect_mavlink(
     app_handle: AppHandle,
 ) -> Result<FcInfo, String> {
     // MAVLink handshake: wait for FC HEARTBEAT, send GCS HEARTBEAT back
-    let (fc_info, fc_sysid) = mavlink_proto::perform_handshake(&mut *byte_transport)?;
+    let (fc_info, fc_sysid, fc_compid) = mavlink_proto::perform_handshake(&mut *byte_transport)?;
 
     log::info!(
         "MAVLink connected: {} (sysid={}) via {}",
@@ -615,7 +615,7 @@ fn connect_mavlink(
     }
 
     // Start the MAVLink handler thread
-    let handle = mavlink_proto::handler::start(byte_transport, fc_sysid, fc_info.fc_variant.clone(), app_handle, recorder_handle, state.rc_tx.clone());
+    let handle = mavlink_proto::handler::start(byte_transport, fc_sysid, fc_compid, fc_info.fc_variant.clone(), app_handle, recorder_handle, state.rc_tx.clone());
 
     // Store MAVLink handle and FC info
     {
