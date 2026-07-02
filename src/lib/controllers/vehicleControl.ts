@@ -171,18 +171,24 @@ export function changeSpeed(speed: number, airspeed: boolean): Promise<boolean> 
   return runCommand('changeSpeed', 'mav_change_speed', { speedType: airspeed ? 0 : 1, speed });
 }
 
-/** Change the active target altitude — repositions to the current lat/lon at the new altitude
- *  (Guided). Needs a GPS fix; the vehicle should be in the guided/reposition-ready mode. */
+/** Change the active target altitude — repositions to the EXISTING Guided target (the loiter centre)
+ *  at the new altitude, so only the height changes. Falling back to the vehicle's momentary position
+ *  would move a fixed-wing's loiter centre to wherever it currently is on its circle, breaking it out
+ *  of the loiter to fly straight there (tester report). The current position is used only when no
+ *  Guided target has been set yet. Needs a GPS fix; the vehicle should be in the reposition-ready mode. */
 export function changeAlt(alt: number): Promise<boolean> {
   const tel = get(telemetry);
   if (tel.fixType < 2) {
     lastFeedback.set({ action: 'changeAlt', ok: false, message: 'No GPS fix', ts: Date.now() });
     return Promise.resolve(false);
   }
+  const target = get(guidedTarget);
+  const lat = target ? target.lat : tel.lat;
+  const lon = target ? target.lon : tel.lon;
   const p = get(guidedParams);
   return runCommand('changeAlt', 'mav_reposition', {
-    lat: Math.round(tel.lat * 1e7),
-    lon: Math.round(tel.lon * 1e7),
+    lat: Math.round(lat * 1e7),
+    lon: Math.round(lon * 1e7),
     alt,
     groundSpeed: p.speed,
     yaw: null,

@@ -3,6 +3,13 @@
   Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 -->
 
+<script module lang="ts">
+  // Persisted across panel close/reopen: the module scope outlives the component instance, so the
+  // last-entered command values (guided altitude, speed, loiter radius, heading, takeoff altitude)
+  // stick like every other panel's state instead of resetting to their defaults each reopen.
+  const savedInputs = { takeoffAlt: 50, changeAlt: 50, changeSpeed: 10, loiterRad: 80, heading: 0 };
+</script>
+
 <script lang="ts">
   // Vehicle-control panel (compact) — direct GCS command of a MAVLink vehicle (ArduPilot + PX4):
   // arm/disarm, flight-mode, takeoff/land/RTL, Guided toggle, mission start/restart. MAVLink-only in
@@ -38,7 +45,7 @@
   let showAllModes = $state(false);
   const stickUnlocked = $derived($stickModesUnlocked); // RC transmitter OR engaged RC control
 
-  let takeoffAlt = $state(50);
+  let takeoffAlt = $state(savedInputs.takeoffAlt);
 
   // Takeoff via NAV_TAKEOFF only makes sense for multirotors / VTOL / PX4. A fixed-wing plane takes
   // off through an AUTO mission (takeoff WP) or manually — the command is rejected, so hide it.
@@ -57,10 +64,18 @@
   // ready mode. In Loiter/Cruise/Auto the altitude is held / pilot- / mission-controlled, so hide it.
   const inGuided = $derived($activeMode?.guided === true);
 
-  let changeAltVal = $state(50);
-  let changeSpeedVal = $state(10);
-  let loiterRadVal = $state(80);
-  let headingVal = $state(0);
+  let changeAltVal = $state(savedInputs.changeAlt);
+  let changeSpeedVal = $state(savedInputs.changeSpeed);
+  let loiterRadVal = $state(savedInputs.loiterRad);
+  let headingVal = $state(savedInputs.heading);
+  // Mirror the live input values back into module scope so they survive the panel closing/reopening.
+  $effect(() => {
+    savedInputs.takeoffAlt = takeoffAlt;
+    savedInputs.changeAlt = changeAltVal;
+    savedInputs.changeSpeed = changeSpeedVal;
+    savedInputs.loiterRad = loiterRadVal;
+    savedInputs.heading = headingVal;
+  });
   // Set Heading is Copter-only (CONDITION_YAW). The fixed-wing GUIDED_CHANGE_HEADING path is removed:
   // ArduPlane's guided heading slew is buggy — it locks heading + bypasses waypoint nav and isn't
   // cleared by reposition (it even rejects descent), so it's unsafe to expose. PX4 has no equivalent.
