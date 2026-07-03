@@ -180,7 +180,7 @@ fn write_session_header(level: LevelFilter, portable: bool) {
     write_raw(&format!("Session start: {now}"));
     write_raw(&format!(
         "Kite Ground Control v{} (build {}, {}) \u{b7} {}/{} \u{b7} portable={}",
-        env!("CARGO_PKG_VERSION"),
+        env!("KITE_APP_VERSION"),
         env!("KITE_GIT_HASH"),
         if cfg!(debug_assertions) { "debug" } else { "release" },
         std::env::consts::OS,
