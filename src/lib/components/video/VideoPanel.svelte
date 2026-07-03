@@ -308,7 +308,7 @@
           <p class="hint">{$t('video.engineMissing')}</p>
           {#if engineDownloading}
             <div class="dl-row">
-              <div class="dl-bar"><div class="dl-fill" style="width:{enginePct}%\"></div></div>
+              <div class="dl-bar"><div class="dl-fill" style="width:{enginePct}%"></div></div>
               <span class="dl-pct">{enginePct}%</span>
             </div>
             {#if engineMsg}<p class="hint">{engineMsg}</p>{/if}
@@ -322,7 +322,7 @@
           <p class="hint">{$t('video.ffmpegV4l2Missing')}</p>
           {#if ffmpegDownloading}
             <div class="dl-row">
-              <div class="dl-bar"><div class="dl-fill" style="width:{ffmpegPct}%\"></div></div>
+              <div class="dl-bar"><div class="dl-fill" style="width:{ffmpegPct}%"></div></div>
               <span class="dl-pct">{ffmpegPct}%</span>
             </div>
             {#if ffmpegMsg}<p class="hint">{ffmpegMsg}</p>{/if}
