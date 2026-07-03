@@ -35,7 +35,7 @@ serde_repr = "0.1"
 serialport = "4"
 log = "0.4"
 rusqlite = { version = "0.31", features = ["bundled"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "http2"], default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.9"  # IANA zone + date → UTC offset (DST-aware) for flight-local time display (ADR-048)
 tzf-rs = "0.4"     # coordinates → IANA timezone name (embedded boundary data) for log imports (ADR-048)

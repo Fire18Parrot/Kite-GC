@@ -71,6 +71,7 @@ use commands::video::{
 };
 use video::Go2Rtc;
 use commands::logging::{set_log_level, get_log_path, log_session_settings};
+use commands::tiles::fetch_tile;
 use commands::radar::{radar_configure, radar_set_center, radar_set_node_pos, radar_snapshot};
 use commands::terrain::{
     terrain_cache_clear, terrain_cache_stats, terrain_elevation, terrain_elevations, terrain_fan,
@@ -269,6 +270,7 @@ pub fn run() {
             set_log_level,
             get_log_path,
             log_session_settings,
+            fetch_tile,
             mission_get,
             mission_clear,
             mission_set,

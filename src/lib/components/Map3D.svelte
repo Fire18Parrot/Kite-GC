@@ -25,6 +25,7 @@
   import { getProviderById } from "$lib/config/mapProviders";
   import type { MapProvider } from "$lib/config/mapProviders";
   import { getCachedTile, putCachedTile, initTileCache } from "$lib/cache/tileCache";
+  import { loadTileBytes } from "$lib/cache/tileLoader";
   import { isKnownUnavailable, isPlaceholderTile } from "$lib/cache/tileAvailability";
   import { isValidGpsCoordinate, MIN_FIX_SATELLITES } from "$lib/helpers/telemetry";
   import {
@@ -526,9 +527,8 @@
    * Throws on error (404, CORS, network) — Cesium will keep the parent tile visible.
    */
   async function fetchAndCacheImage(url: string, meta?: TileMeta): Promise<HTMLImageElement> {
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`Tile ${resp.status}`);
-    const buf = await resp.arrayBuffer();
+    // Route through the backend loader (reqwest/HTTP2) — same speed win as the 2D map.
+    const buf = await loadTileBytes(url);
     // Over-zoom placeholder? Reject (Cesium keeps the parent z-1 tile) and don't cache it; the region's
     // max zoom is now learned so siblings short-circuit.
     // NOTE: deliberately do NOT trigger a full imagery refresh here. Re-applying the provider does

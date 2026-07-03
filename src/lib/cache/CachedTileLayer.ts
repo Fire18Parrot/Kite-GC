@@ -11,6 +11,7 @@
 
 import L from "leaflet";
 import { getCachedTile, putCachedTile } from "$lib/cache/tileCache";
+import { loadTileBytes } from "$lib/cache/tileLoader";
 import {
   isKnownUnavailable,
   isPlaceholderTile,
@@ -71,11 +72,7 @@ export const CachedTileLayer = L.TileLayer.extend({
   _fetchAndCache(tile: HTMLImageElement, url: string, done: L.DoneCallback, coords?: L.Coords) {
     const providerId: string | undefined = this.options.providerId;
     // Try to fetch and cache, but always display the tile even if caching fails
-    fetch(url)
-      .then((resp) => {
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        return resp.arrayBuffer();
-      })
+    loadTileBytes(url)
       .then((buf) => {
         // Over-zoom placeholder? Don't cache it. Once confirmed, fail the tile
         // and redraw — the redraw re-creates it as a parent-filled fallback.
@@ -203,8 +200,7 @@ export const CachedTileLayer = L.TileLayer.extend({
         const purl = this._buildUrlAt(px, py, pz);
         let buf: ArrayBuffer | null = null;
         try {
-          const resp = await fetch(purl);
-          if (resp.ok) buf = await resp.arrayBuffer();
+          buf = await loadTileBytes(purl);
         } catch { return; /* network issue — keep the optimistic paint */ }
         if (!buf) return;
         if (!isPlaceholderTile(providerId, pz, px, py, buf, purl)) {
