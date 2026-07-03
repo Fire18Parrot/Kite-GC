@@ -41,7 +41,13 @@ impl MjpegServer {
         listener.set_nonblocking(true).map_err(|e| format!("set_nonblocking: {e}"))?;
         let port = listener.local_addr().map_err(|e| format!("addr: {e}"))?.port();
 
-        let mut ffmpeg = Command::new("ffmpeg")
+        // Resolve ffmpeg through the project's managed discovery (auto-download
+        // on demand for Win/Linux, bundled on macOS). Falls back to "ffmpeg" if
+        // not found (the error message will guide the user to install it).
+        let ffmpeg_bin = super::ffmpeg::find_ffmpeg()
+            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
+
+        let mut ffmpeg = Command::new(&ffmpeg_bin)
             .args([
                 "-loglevel", "error",
                 "-f", "v4l2",

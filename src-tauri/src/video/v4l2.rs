@@ -26,10 +26,10 @@ pub struct V4l2Device {
 ///
 /// Returns an empty Vec on non-Linux platforms (no-op).
 pub fn enumerate() -> Vec<V4l2Device> {
-    if !cfg!(target_os = "linux") {
-        return Vec::new();
-    }
-    enumerate_linux()
+    #[cfg(target_os = "linux")]
+    { enumerate_linux() }
+    #[cfg(not(target_os = "linux"))]
+    { Vec::new() }
 }
 
 #[cfg(target_os = "linux")]
