@@ -479,8 +479,9 @@ export async function startRtsp(): Promise<void> {
   }
 }
 
-/** Open a V4L2 capture device via go2rtc's ffmpeg pipe.
- *  Uses WebRTC when available, falls back to MJPEG over HTTP otherwise. */
+/** Open a V4L2 capture device via the built-in MJPEG server.
+ *  V4L2 is Linux-only, and WebKitGTK's WebRTC support is inconsistent across
+ *  distros — the self-contained MJPEG path works reliably everywhere. */
 export async function startV4l2(): Promise<void> {
   stopTracks();
   const st = get(videoState);
@@ -492,7 +493,6 @@ export async function startV4l2(): Promise<void> {
   patch({ kind: 'v4l2', enabled: true, status: 'starting', error: null, rtspEngine: null, mjpegUrl: null });
   savePrefs();
 
-  // Map resolution to width x height
   const dims: Record<VideoResolution, [number, number]> = {
     auto: [1280, 720],
     '720p': [1280, 720],
@@ -500,17 +500,9 @@ export async function startV4l2(): Promise<void> {
   };
   const [width, height] = dims[st.resolution];
   try {
-    if (!isWebrtcAvailable()) {
-      // Use built-in MJPEG server — no go2rtc/WebRTC dependency
-      const url = await startV4l2Mjpeg(device, width, height);
-      patch({ status: 'live', mjpegUrl: url, error: null, rtspEngine: 'ffmpeg', width, height });
-      return;
-    }
-    // WebRTC path: use go2rtc
-    await invoke('video_v4l2_start', { device, width, height });
-    await negotiateWebrtc(device, true);
+    const url = await startV4l2Mjpeg(device, width, height);
+    patch({ status: 'live', mjpegUrl: url, error: null, rtspEngine: 'ffmpeg', width, height });
   } catch (e) {
-    closeRtc();
     patch({ status: 'error', error: e instanceof Error ? e.message : String(e), mjpegUrl: null });
   }
 }
