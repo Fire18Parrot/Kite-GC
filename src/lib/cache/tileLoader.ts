@@ -12,11 +12,16 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-/** Fetch raw tile bytes via the Rust backend, falling back to the WebView's fetch(). */
-export async function loadTileBytes(url: string): Promise<ArrayBuffer> {
+/**
+ * Fetch raw tile bytes via the Rust backend, falling back to the WebView's fetch().
+ * `layer` is a stable per-layer key (the layer's URL template) — the backend caps
+ * concurrency per layer, so a multi-layer provider (ESRI Hybrid) isn't throttled by
+ * its own overlays while single-layer community providers stay conservatively capped.
+ */
+export async function loadTileBytes(url: string, layer: string): Promise<ArrayBuffer> {
   try {
     // Tauri delivers the command's `Response` bytes as an ArrayBuffer.
-    return await invoke<ArrayBuffer>("fetch_tile", { url });
+    return await invoke<ArrayBuffer>("fetch_tile", { url, layer });
   } catch {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);

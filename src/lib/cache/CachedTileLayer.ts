@@ -71,8 +71,9 @@ export const CachedTileLayer = L.TileLayer.extend({
 
   _fetchAndCache(tile: HTMLImageElement, url: string, done: L.DoneCallback, coords?: L.Coords) {
     const providerId: string | undefined = this.options.providerId;
-    // Try to fetch and cache, but always display the tile even if caching fails
-    loadTileBytes(url)
+    // Try to fetch and cache, but always display the tile even if caching fails.
+    // this._url is the layer's URL template — the backend caps concurrency per layer.
+    loadTileBytes(url, this._url)
       .then((buf) => {
         // Over-zoom placeholder? Don't cache it. Once confirmed, fail the tile
         // and redraw — the redraw re-creates it as a parent-filled fallback.
@@ -200,7 +201,7 @@ export const CachedTileLayer = L.TileLayer.extend({
         const purl = this._buildUrlAt(px, py, pz);
         let buf: ArrayBuffer | null = null;
         try {
-          buf = await loadTileBytes(purl);
+          buf = await loadTileBytes(purl, this._url);
         } catch { return; /* network issue — keep the optimistic paint */ }
         if (!buf) return;
         if (!isPlaceholderTile(providerId, pz, px, py, buf, purl)) {

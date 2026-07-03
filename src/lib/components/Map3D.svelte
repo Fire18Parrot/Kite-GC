@@ -502,7 +502,7 @@
   /**
    * Load a tile image — checks IndexedDB cache first, then fetches from network.
    */
-  async function loadCachedImage(url: string, meta?: TileMeta): Promise<HTMLImageElement> {
+  async function loadCachedImage(url: string, meta: TileMeta | undefined, layerKey: string): Promise<HTMLImageElement> {
     // Check IndexedDB cache
     const cached = await getCachedTile(url);
     if (cached) {
@@ -513,22 +513,23 @@
         img.onerror = () => {
           URL.revokeObjectURL(cached);
           // Cache entry corrupted — fall back to network
-          fetchAndCacheImage(url, meta).then(resolve, reject);
+          fetchAndCacheImage(url, meta, layerKey).then(resolve, reject);
         };
         img.src = cached;
       });
     }
     // Cache miss — fetch from network
-    return fetchAndCacheImage(url, meta);
+    return fetchAndCacheImage(url, meta, layerKey);
   }
 
   /**
    * Fetch a tile from network, store in IndexedDB cache, return as Image.
    * Throws on error (404, CORS, network) — Cesium will keep the parent tile visible.
    */
-  async function fetchAndCacheImage(url: string, meta?: TileMeta): Promise<HTMLImageElement> {
+  async function fetchAndCacheImage(url: string, meta: TileMeta | undefined, layerKey: string): Promise<HTMLImageElement> {
     // Route through the backend loader (reqwest/HTTP2) — same speed win as the 2D map.
-    const buf = await loadTileBytes(url);
+    // layerKey (the provider template) caps concurrency per layer in the backend.
+    const buf = await loadTileBytes(url, layerKey);
     // Over-zoom placeholder? Reject (Cesium keeps the parent z-1 tile) and don't cache it; the region's
     // max zoom is now learned so siblings short-circuit.
     // NOTE: deliberately do NOT trigger a full imagery refresh here. Re-applying the provider does
@@ -584,7 +585,8 @@
       }
       const tileUrl = buildTileUrl(cesiumUrl, x, y, level, subdomains);
       const meta = detectId ? { providerId: detectId, z: level, x, y } : undefined;
-      return loadCachedImage(tileUrl, meta);
+      // provider.url (the Leaflet template) is the per-layer concurrency key — same as 2D.
+      return loadCachedImage(tileUrl, meta, provider.url);
     };
 
     // Silently handle tile errors — prevents "rendering has stopped" crash.
