@@ -47,6 +47,10 @@
   $effect(() => {
     void enumerateVideoDevices();
     void enumerateV4l2Devices();
+    // If a saved session had V4L2 selected but we're not on Linux, reset to camera.
+    if (!isLinux && $videoState.kind === 'v4l2') {
+      void setVideoKind('camera');
+    }
   });
 
   // ── RTSP / V4L2 dependencies ──────────────────────────────────────────
@@ -126,7 +130,9 @@
     return () => unlisteners.forEach((u) => u());
   });
 
-  const KINDS: VideoKind[] = ['camera', 'rtsp', 'v4l2'];
+  // V4L2 is Linux-only (relies on /sys/class/video4linux).
+  const isLinux = typeof navigator !== 'undefined' && navigator.userAgent.includes('Linux');
+  const KINDS: VideoKind[] = isLinux ? ['camera', 'rtsp', 'v4l2'] : ['camera', 'rtsp'];
 
   // MJPEG FPS counter — onload fires per frame in multipart streams.
   let mjpegFps = $state(0);
