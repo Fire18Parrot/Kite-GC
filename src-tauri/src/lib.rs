@@ -67,9 +67,10 @@ use commands::system::system_on_battery;
 use commands::video::{
     video_ffmpeg_status, video_ffmpeg_download,
     video_go2rtc_status, video_go2rtc_download, video_webrtc_start, video_webrtc_offer,
-    video_webrtc_stop,
+    video_webrtc_stop, video_list_v4l2, video_v4l2_start, video_go2rtc_port,
+    video_v4l2_mjpeg_start, video_v4l2_mjpeg_stop,
 };
-use video::Go2Rtc;
+use video::{Go2Rtc, MjpegServer};
 use commands::logging::{set_log_level, get_log_path, log_session_settings};
 use commands::radar::{radar_configure, radar_set_center, radar_set_node_pos, radar_snapshot};
 use commands::terrain::{
@@ -255,6 +256,7 @@ pub fn run() {
         .manage(RelayHub::new())
         .manage(HidManager::new())
         .manage(Go2Rtc::new())
+        .manage(MjpegServer::new())
         .invoke_handler(tauri::generate_handler![
             list_serial_ports,
             scan_ble_devices,
@@ -403,6 +405,11 @@ pub fn run() {
             video_webrtc_start,
             video_webrtc_offer,
             video_webrtc_stop,
+            video_list_v4l2,
+            video_v4l2_start,
+            video_go2rtc_port,
+            video_v4l2_mjpeg_start,
+            video_v4l2_mjpeg_stop,
             radar_configure,
             radar_set_center,
             radar_set_node_pos,

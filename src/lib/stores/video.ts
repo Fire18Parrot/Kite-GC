@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 
-// Embedded video — source router (v1: local webcam / USB capture).
+// Embedded video — source router (v1: local webcam / USB capture; v2: RTSP via go2rtc;
+// v3: V4L2 native capture for Linux HDMI dongles not exposed via getUserMedia).
 //
 // The router opens a source once and exposes its MediaStream; multiple sinks
 // (the NavRail panel preview, the dock widget, the floating window, the
@@ -11,6 +12,7 @@
 // `getUserMedia` works in both WebView2 (Windows) and WebKitGTK (Linux), so the
 // webcam path needs no backend. Network streams (RTSP/UDP via a backend
 // gstreamer pipeline) and OS-window detach are v2, layered on this same router.
+// V4L2 capture devices go through go2rtc/ffmpeg → WebRTC (same pipeline as RTSP).
 
 import { writable, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
@@ -20,22 +22,33 @@ export interface VideoDevice {
   label: string;
 }
 
+/** A V4L2 capture device discovered by the Rust backend (Linux). */
+export interface V4l2Device {
+  path: string;
+  name: string;
+  bus_info: string;
+}
+
 export type VideoStatus = 'off' | 'starting' | 'live' | 'error';
 export type VideoResolution = 'auto' | '720p' | '1080p';
-/** Source kind: a local capture device (MediaStream) or a backend RTSP bridge (loopback URL). */
-export type VideoKind = 'camera' | 'rtsp';
+/** Source kind: local camera (MediaStream), RTSP bridge (go2rtc), or V4L2 native capture. */
+export type VideoKind = 'camera' | 'rtsp' | 'v4l2';
 /** Which go2rtc reader served the live RTSP feed: native client or the ffmpeg fallback. */
 export type RtspEngine = 'native' | 'ffmpeg' | null;
 /** Where the single map instance currently lives (the inverse of which surfaces show video). */
 export type MapLocation = 'main' | 'floating' | 'widget';
 
 export interface VideoState {
-  /** Active source kind. `camera` → MediaStream/`srcObject`; `rtsp` → loopback `<video src>`. */
+  /** Active source kind. `camera` → MediaStream/`srcObject`; `rtsp` → loopback `<video src>`; `v4l2` → go2rtc/ffmpeg→WebRTC. */
   kind: VideoKind;
   /** User wants video on (source open). */
   enabled: boolean;
   status: VideoStatus;
   devices: VideoDevice[];
+  /** V4L2 capture devices (Linux) — enumerated by the Rust backend. */
+  v4l2Devices: V4l2Device[];
+  /** Selected V4L2 device path (e.g. "/dev/video0"), null if none. */
+  v4l2Device: string | null;
   /** Selected video input device (null = system default). */
   deviceId: string | null;
   resolution: VideoResolution;
@@ -44,6 +57,8 @@ export interface VideoState {
   rtspUrl: string;
   /** Active RTSP reader once live (native go2rtc client vs ffmpeg fallback); runtime-only. */
   rtspEngine: RtspEngine;
+  /** go2rtc MJPEG HTTP URL for systems where RTCPeerConnection is unavailable. */
+  mjpegUrl: string | null;
   /** Mirror horizontally (front-facing cams) — applied by the display sinks. */
   mirror: boolean;
   /** Source aspect ratio (w/h); drives the widget / floating-window sizing. */
@@ -87,6 +102,7 @@ interface VideoPrefs {
   deviceId: string | null;
   resolution: VideoResolution;
   rtspUrl: string;
+  v4l2Device: string | null;
   mirror: boolean;
   floating: boolean;
   floatSnapped: boolean;
@@ -101,6 +117,7 @@ const PREF_DEFAULTS: VideoPrefs = {
   deviceId: null,
   resolution: 'auto',
   rtspUrl: '',
+  v4l2Device: null,
   mirror: false,
   floating: false,
   floatSnapped: true,
@@ -121,6 +138,7 @@ function loadPrefs(): VideoPrefs {
         deviceId: p.deviceId ?? null,
         resolution: p.resolution ?? 'auto',
         rtspUrl: p.rtspUrl ?? '',
+        v4l2Device: p.v4l2Device ?? null,
       };
     }
   } catch {
@@ -141,6 +159,7 @@ function savePrefs(): void {
         deviceId: s.deviceId,
         resolution: s.resolution,
         rtspUrl: s.rtspUrl,
+        v4l2Device: s.v4l2Device,
         mirror: s.mirror,
         floating: s.floating,
         floatSnapped: s.floatSnapped,
@@ -161,10 +180,13 @@ const INITIAL: VideoState = {
   enabled: false, // runtime flag — auto-start (below) decides whether to turn on
   status: 'off',
   devices: [],
+  v4l2Devices: [],
+  v4l2Device: boot.v4l2Device,
   deviceId: boot.deviceId,
   resolution: boot.resolution,
   rtspUrl: boot.rtspUrl,
   rtspEngine: null,
+  mjpegUrl: null,
   mirror: boot.mirror,
   aspect: 16 / 9,
   width: null,
@@ -225,6 +247,28 @@ function mediaDevicesAvailable(): boolean {
   return typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia;
 }
 
+/** Check if RTCPeerConnection is available (WebRTC support in the WebView). */
+export function isWebrtcAvailable(): boolean {
+  return typeof RTCPeerConnection !== 'undefined';
+}
+
+/** Build the go2rtc MJPEG URL from the running engine's API port. */
+async function buildMjpegUrl(): Promise<string> {
+  const port = await invoke<number | null>('video_go2rtc_port');
+  if (!port) throw new Error('go2rtc not running');
+  return `http://127.0.0.1:${port}/api/stream.mjpeg?src=kite`;
+}
+
+/** Start a V4L2 device via the built-in MJPEG server (no go2rtc dependency). */
+async function startV4l2Mjpeg(device: string, width: number, height: number): Promise<string> {
+  return await invoke<string>('video_v4l2_mjpeg_start', { device, width, height });
+}
+
+/** Stop the built-in MJPEG server. */
+async function stopV4l2Mjpeg(): Promise<void> {
+  await invoke('video_v4l2_mjpeg_stop').catch(() => {});
+}
+
 /** Enumerate video input devices. Labels are only populated once permission has
  *  been granted (i.e. after the first successful getUserMedia). */
 export async function enumerateVideoDevices(): Promise<void> {
@@ -243,6 +287,26 @@ export async function enumerateVideoDevices(): Promise<void> {
     if (sel && !devices.some((d) => d.deviceId === sel)) patch({ deviceId: null });
   } catch (e) {
     patch({ error: `Device enumeration failed: ${e}` });
+  }
+}
+
+/** Enumerate V4L2 capture devices via the Rust backend (Linux only). */
+export async function enumerateV4l2Devices(): Promise<void> {
+  try {
+    const devices = await invoke<V4l2Device[]>('video_list_v4l2');
+    patch({ v4l2Devices: devices });
+    // Auto-select the first device if none selected yet, or drop stale.
+    const sel = get(videoState).v4l2Device;
+    if (devices.length > 0) {
+      if (!sel || !devices.some((d) => d.path === sel)) {
+        patch({ v4l2Device: devices[0].path });
+      }
+    } else if (sel) {
+      patch({ v4l2Device: null });
+    }
+  } catch (e) {
+    // V4L2 not available on this platform — that's fine.
+    patch({ v4l2Devices: [] });
   }
 }
 
@@ -373,8 +437,8 @@ async function negotiateWebrtc(url: string, useFfmpeg: boolean): Promise<void> {
   patch({ rtspEngine: useFfmpeg ? 'ffmpeg' : 'native' });
 }
 
-/** Open (or re-open) the RTSP feed via go2rtc + WebRTC. Tries go2rtc's native RTSP client first,
- *  then automatically falls back to its bundled-ffmpeg reader (handles quirky servers). */
+/** Open (or re-open) the RTSP feed via go2rtc. Uses WebRTC when available,
+ *  falls back to MJPEG over HTTP when RTCPeerConnection is missing. */
 export async function startRtsp(): Promise<void> {
   stopTracks(); // release the camera / previous peer connection
   const st = get(videoState);
@@ -383,8 +447,22 @@ export async function startRtsp(): Promise<void> {
     patch({ kind: 'rtsp', enabled: true, status: 'error', error: 'No RTSP URL' });
     return;
   }
-  patch({ kind: 'rtsp', enabled: true, status: 'starting', error: null, rtspEngine: null });
+  patch({ kind: 'rtsp', enabled: true, status: 'starting', error: null, rtspEngine: null, mjpegUrl: null });
   savePrefs();
+
+  // MJPEG fallback: register the source (go2rtc handles RTSP natively) and use its HTTP endpoint.
+  if (!isWebrtcAvailable()) {
+    try {
+      // Start the stream with go2rtc's native client (no WebRTC needed)
+      await invoke('video_webrtc_start', { url, useFfmpeg: false });
+      const mjpegUrl = await buildMjpegUrl();
+      patch({ status: 'live', mjpegUrl, error: null, rtspEngine: 'native' });
+    } catch (e) {
+      closeRtc();
+      patch({ status: 'error', error: e instanceof Error ? e.message : String(e) });
+    }
+    return;
+  }
 
   try {
     await negotiateWebrtc(url, false); // native go2rtc RTSP client
@@ -401,17 +479,59 @@ export async function startRtsp(): Promise<void> {
   }
 }
 
+/** Open a V4L2 capture device via go2rtc's ffmpeg pipe.
+ *  Uses WebRTC when available, falls back to MJPEG over HTTP otherwise. */
+export async function startV4l2(): Promise<void> {
+  stopTracks();
+  const st = get(videoState);
+  const device = st.v4l2Device;
+  if (!device) {
+    patch({ kind: 'v4l2', enabled: true, status: 'error', error: 'No V4L2 device selected' });
+    return;
+  }
+  patch({ kind: 'v4l2', enabled: true, status: 'starting', error: null, rtspEngine: null, mjpegUrl: null });
+  savePrefs();
+
+  // Map resolution to width x height
+  const dims: Record<VideoResolution, [number, number]> = {
+    auto: [1280, 720],
+    '720p': [1280, 720],
+    '1080p': [1920, 1080],
+  };
+  const [width, height] = dims[st.resolution];
+  try {
+    if (!isWebrtcAvailable()) {
+      // Use built-in MJPEG server — no go2rtc/WebRTC dependency
+      const url = await startV4l2Mjpeg(device, width, height);
+      patch({ status: 'live', mjpegUrl: url, error: null, rtspEngine: 'ffmpeg', width, height });
+      return;
+    }
+    // WebRTC path: use go2rtc
+    await invoke('video_v4l2_start', { device, width, height });
+    await negotiateWebrtc(device, true);
+  } catch (e) {
+    closeRtc();
+    patch({ status: 'error', error: e instanceof Error ? e.message : String(e), mjpegUrl: null });
+  }
+}
+
 /** Start whichever source kind is currently selected. */
 export function startActive(): Promise<void> {
-  return get(videoState).kind === 'rtsp' ? startRtsp() : startVideo();
+  const kind = get(videoState).kind;
+  if (kind === 'rtsp') return startRtsp();
+  if (kind === 'v4l2') return startV4l2();
+  return startVideo();
 }
 
 /** Stop the source and release the camera / go2rtc engine. */
 export function stopVideo(): void {
-  const wasRtsp = get(videoState).kind === 'rtsp';
+  const wasBackend = get(videoState).kind === 'rtsp' || get(videoState).kind === 'v4l2';
   stopTracks();
-  if (wasRtsp) void invoke('video_webrtc_stop').catch(() => {});
-  patch({ enabled: false, status: 'off', error: null, rtspEngine: null });
+  if (wasBackend) {
+    void invoke('video_webrtc_stop').catch(() => {});
+    void stopV4l2Mjpeg();
+  }
+  patch({ enabled: false, status: 'off', error: null, rtspEngine: null, mjpegUrl: null });
   savePrefs();
 }
 
@@ -433,6 +553,13 @@ export async function setVideoKind(kind: VideoKind): Promise<void> {
 export function setRtspUrl(rtspUrl: string): void {
   patch({ rtspUrl });
   savePrefs();
+}
+
+/** Switch V4L2 device; restarts the stream if currently live. */
+export async function setV4l2Device(device: string | null): Promise<void> {
+  patch({ v4l2Device: device });
+  savePrefs();
+  if (get(videoState).enabled && get(videoState).kind === 'v4l2') await startV4l2();
 }
 
 /** Switch device / resolution; restarts the stream if currently live. */

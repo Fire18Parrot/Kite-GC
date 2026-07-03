@@ -634,7 +634,8 @@
     "source": "Quelle",
     "kind": {
       "camera": "Kamera (Gerät)",
-      "rtsp": "RTSP (Netzwerk)"
+      "rtsp": "RTSP (Netzwerk)",
+      "v4l2": "V4L2 / USB-Capture"
     },
     "device": "Video-Gerät",
     "defaultDevice": "Standardgerät",
@@ -657,7 +658,9 @@
     "snapCorner": "An Ecke andocken",
     "pip": "Bild-im-Bild",
     "close": "Schließen",
-    "noDevices": "Keine Kamera erkannt. Kamera oder USB-Capture-Gerät anschließen."
+    "noDevices": "Keine Kamera erkannt. Kamera oder USB-Capture-Gerät anschließen.",
+    "noV4l2Devices": "Keine V4L2-Capture-Geräte gefunden. USB-HDMI-Dongle oder anderes V4L2-Gerät anschließen.",
+    "ffmpegV4l2Missing": "ffmpeg wird für V4L2-Capture benötigt – liest das Rohgerät und leitet es an go2rtc weiter."
   },
   "terrain": {
     "title": "Geländeanalyse",
