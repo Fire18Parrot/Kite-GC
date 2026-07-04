@@ -634,7 +634,8 @@
     "source": "Source",
     "kind": {
       "camera": "Camera (device)",
-      "rtsp": "RTSP (network)"
+      "rtsp": "RTSP (network)",
+      "v4l2": "V4L2 / USB Capture"
     },
     "device": "Video Device",
     "defaultDevice": "Default device",
@@ -657,7 +658,9 @@
     "snapCorner": "Snap to corner",
     "pip": "Picture-in-Picture",
     "close": "Close",
-    "noDevices": "No camera detected. Connect a camera or USB capture device."
+    "noDevices": "No camera detected. Connect a camera or USB capture device.",
+    "noV4l2Devices": "No V4L2 capture devices found. Connect a USB HDMI dongle or other V4L2 device.",
+    "ffmpegV4l2Missing": "ffmpeg is required for V4L2 capture — it reads the raw device and feeds it to go2rtc."
   },
   "terrain": {
     "title": "Terrain Analysis",

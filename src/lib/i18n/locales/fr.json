@@ -623,7 +623,8 @@
     "source": "Source",
     "kind": {
       "camera": "Caméra (périphérique)",
-      "rtsp": "RTSP (réseau)"
+      "rtsp": "RTSP (réseau)",
+      "v4l2": "V4L2 / Capture USB"
     },
     "device": "Périphérique vidéo",
     "defaultDevice": "Périphérique par défaut",
@@ -646,7 +647,9 @@
     "snapCorner": "Aligner dans le coin",
     "pip": "Image dans l'image",
     "close": "Fermer",
-    "noDevices": "Aucune caméra détectée. Branchez une caméra ou un boîtier de capture USB."
+    "noDevices": "Aucune caméra détectée. Branchez une caméra ou un boîtier de capture USB.",
+    "noV4l2Devices": "Aucun périphérique de capture V4L2 trouvé. Branchez un dongle HDMI USB ou autre périphérique V4L2.",
+    "ffmpegV4l2Missing": "ffmpeg est requis pour la capture V4L2 — il lit le périphérique brut et l'envoie à go2rtc."
   },
   "terrain": {
     "title": "Analyse du terrain",

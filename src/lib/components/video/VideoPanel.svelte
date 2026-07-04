@@ -29,6 +29,8 @@
     pipSupported,
     type VideoResolution,
     type VideoKind,
+    enumerateV4l2Devices,
+    setV4l2Device,
   } from '$lib/stores/video';
   import PanelShell from '$lib/components/panel/PanelShell.svelte';
   import Button from '$lib/components/panel/Button.svelte';
@@ -44,11 +46,17 @@
   // Populate the device list when the panel opens.
   $effect(() => {
     void enumerateVideoDevices();
+    void enumerateV4l2Devices();
+    // If a saved session had V4L2 selected but we're not on Linux, reset to camera.
+    if (!isLinux && $videoState.kind === 'v4l2') {
+      void setVideoKind('camera');
+    }
   });
 
-  // ── RTSP dependencies ────────────────────────────────────────────────
+  // ── RTSP / V4L2 dependencies ──────────────────────────────────────────
   // go2rtc is required (the RTSP→WebRTC engine); ffmpeg is the optional fallback reader for sources
-  // go2rtc's native client can't read (e.g. obs-rtspserver). Both are downloaded on demand.
+  // go2rtc's native client can't read (e.g. obs-rtspserver), and the V4L2 path always uses it.
+  // Both are downloaded on demand.
   let engineVer = $state<string | null>(null);
   let engineChecked = $state(false);
   let engineDownloading = $state(false);
@@ -122,7 +130,24 @@
     return () => unlisteners.forEach((u) => u());
   });
 
-  const KINDS: VideoKind[] = ['camera', 'rtsp'];
+  // V4L2 is Linux-only (relies on /sys/class/video4linux).
+  const isLinux = typeof navigator !== 'undefined' && navigator.userAgent.includes('Linux');
+  const KINDS: VideoKind[] = isLinux ? ['camera', 'rtsp', 'v4l2'] : ['camera', 'rtsp'];
+
+  // MJPEG FPS counter — onload fires per frame in multipart streams.
+  let mjpegFps = $state(0);
+  let _mjpegFrames = 0;
+  let _mjpegLast = performance.now();
+  function mjpegFrameTick(): void {
+    _mjpegFrames++;
+    const now = performance.now();
+    const dt = now - _mjpegLast;
+    if (dt >= 1000) {
+      mjpegFps = (_mjpegFrames * 1000) / dt;
+      _mjpegFrames = 0;
+      _mjpegLast = now;
+    }
+  }
 
   // Measured (real) frame rate via requestVideoFrameCallback.
   let measuredFps = $state(0);
@@ -168,21 +193,32 @@
 {#snippet body()}
   <div class="vp-body">
     <div class="preview" style="aspect-ratio: {$videoState.aspect};">
-      <!-- svelte-ignore a11y_media_has_caption -->
-      <video
-        bind:this={videoEl}
-        autoplay
-        muted
-        playsinline
-        class:mirror={$videoState.mirror}
-        class:hidden={$videoState.status !== 'live'}
-        onloadedmetadata={(e) => reportVideoSize(e.currentTarget.videoWidth, e.currentTarget.videoHeight)}
-        onerror={() => console.error('[video] element error', videoEl?.error?.code, videoEl?.error?.message)}
-        onloadeddata={() => console.log('[video] loadeddata, readyState', videoEl?.readyState)}
-        onstalled={() => console.warn('[video] stalled')}
-        onwaiting={() => console.warn('[video] waiting/buffering')}
-      ></video>
-      {#if $videoState.status !== 'live'}
+      {#if $videoState.mjpegUrl}
+        <!-- MJPEG: embedded ffmpeg server, each frame triggers onload -->
+        <!-- svelte-ignore a11y_missing_attribute -->
+        <img
+          src={$videoState.mjpegUrl}
+          alt="Live video"
+          class:mirror={$videoState.mirror}
+          onload={mjpegFrameTick}
+        />
+      {:else}
+        <!-- svelte-ignore a11y_media_has_caption -->
+        <video
+          bind:this={videoEl}
+          autoplay
+          muted
+          playsinline
+          class:mirror={$videoState.mirror}
+          class:hidden={$videoState.status !== 'live'}
+          onloadedmetadata={(e) => reportVideoSize(e.currentTarget.videoWidth, e.currentTarget.videoHeight)}
+          onerror={() => console.error('[video] element error', videoEl?.error?.code, videoEl?.error?.message)}
+          onloadeddata={() => console.log('[video] loadeddata, readyState', videoEl?.readyState)}
+          onstalled={() => console.warn('[video] stalled')}
+          onwaiting={() => console.warn('[video] waiting/buffering')}
+        ></video>
+      {/if}
+      {#if $videoState.status !== 'live' && !$videoState.mjpegUrl}
         <div class="preview-placeholder">
           {#if $videoState.status === 'starting'}
             {$t('video.starting')}
@@ -198,7 +234,7 @@
     {#if $videoState.status === 'live'}
       <div class="info-line">
         {$videoState.width ?? '–'}×{$videoState.height ?? '–'}
-        · {measuredFps ? measuredFps.toFixed(0) : '–'}{#if $videoState.frameRate}/{Math.round($videoState.frameRate)}{/if} fps
+        · {$videoState.mjpegUrl ? mjpegFps.toFixed(0) : (measuredFps ? measuredFps.toFixed(0) : '–')}{#if $videoState.frameRate}/{Math.round($videoState.frameRate)}{/if} fps
       </div>
     {/if}
 
@@ -242,6 +278,65 @@
 
       {#if $videoState.devices.length === 0}
         <p class="hint">{$t('video.noDevices')}</p>
+      {/if}
+    {:else if $videoState.kind === 'v4l2'}
+      <label class="field">
+        <span class="label">{$t('video.device')}</span>
+        <select
+          value={$videoState.v4l2Device ?? ''}
+          onchange={(e) => setV4l2Device((e.currentTarget as HTMLSelectElement).value || null)}
+        >
+          {#each $videoState.v4l2Devices as d}
+            <option value={d.path}>{d.name} ({d.path})</option>
+          {/each}
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="label">{$t('video.resolution')}</span>
+        <select
+          value={$videoState.resolution}
+          onchange={(e) => setVideoResolution((e.currentTarget as HTMLSelectElement).value as VideoResolution)}
+        >
+          {#each RESOLUTIONS as r}
+            <option value={r}>{r === 'auto' ? $t('video.auto') : r}</option>
+          {/each}
+        </select>
+      </label>
+
+      {#if $videoState.v4l2Devices.length === 0}
+        <p class="hint">{$t('video.noV4l2Devices')}</p>
+      {/if}
+
+      <!-- V4L2 also needs go2rtc + ffmpeg (engine required, ffmpeg required) -->
+      {#if engineChecked && !engineVer}
+        <div class="ffmpeg-box">
+          <p class="hint">{$t('video.engineMissing')}</p>
+          {#if engineDownloading}
+            <div class="dl-row">
+              <div class="dl-bar"><div class="dl-fill" style="width:{enginePct}%"></div></div>
+              <span class="dl-pct">{enginePct}%</span>
+            </div>
+            {#if engineMsg}<p class="hint">{engineMsg}</p>{/if}
+          {:else}
+            <Button variant="data" onclick={downloadEngine}>{$t('video.engineDownload')}</Button>
+            {#if engineMsg}<p class="hint err">{engineMsg}</p>{/if}
+          {/if}
+        </div>
+      {:else if engineVer && ffmpegChecked && !ffmpegVer}
+        <div class="ffmpeg-box">
+          <p class="hint">{$t('video.ffmpegV4l2Missing')}</p>
+          {#if ffmpegDownloading}
+            <div class="dl-row">
+              <div class="dl-bar"><div class="dl-fill" style="width:{ffmpegPct}%"></div></div>
+              <span class="dl-pct">{ffmpegPct}%</span>
+            </div>
+            {#if ffmpegMsg}<p class="hint">{ffmpegMsg}</p>{/if}
+          {:else}
+            <Button variant="standard" onclick={downloadFfmpeg}>{$t('video.ffmpegFallbackDownload')}</Button>
+            {#if ffmpegMsg}<p class="hint err">{ffmpegMsg}</p>{/if}
+          {/if}
+        </div>
       {/if}
     {:else}
       <label class="field">
@@ -339,6 +434,8 @@
   .preview video { width: 100%; height: 100%; object-fit: contain; display: block; }
   .preview video.mirror { transform: scaleX(-1); }
   .preview video.hidden { visibility: hidden; }
+  .preview img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .preview img.mirror { transform: scaleX(-1); }
   .preview-placeholder {
     position: absolute;
     inset: 0;
