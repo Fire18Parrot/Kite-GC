@@ -96,34 +96,12 @@ impl RadarSource for AdsbOnlineSource {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new());
 
-            'outer: loop {
+            loop {
                 if stop_task.load(Ordering::Relaxed) {
                     break;
                 }
-                // Rate gate: wait until at least `poll` has elapsed since the last fetch. The instant is
-                // shared with the manager, so a source rebuilt by a reconfigure (connect/disconnect, a
-                // settings toggle) keeps the gap instead of fetching immediately — the poll interval can
-                // no longer be bypassed, no matter what triggers the rebuild. Cold start (None) → no wait.
-                let due_in = self
-                    .last_fetch
-                    .lock()
-                    .ok()
-                    .and_then(|g| *g)
-                    .map(|t| self.poll.saturating_sub(t.elapsed()))
-                    .unwrap_or(Duration::ZERO);
-                let mut waited = Duration::ZERO;
-                while waited < due_in {
-                    if stop_task.load(Ordering::Relaxed) {
-                        break 'outer;
-                    }
-                    tokio::time::sleep(POLL_GRANULARITY).await;
-                    waited += POLL_GRANULARITY;
-                }
 
-                // Live radius each cycle (3D sizes the query to the visible area); fall back to config.
-                let radius_km = self.radius.lock().ok().and_then(|r| *r).unwrap_or(self.radius_km);
-                let dist_nm = (radius_km / KM_PER_NM).clamp(1.0, 250.0).round() as i64;
-                // Read the live centre each cycle (follows the map viewport / UAV). Skip if unset.
+                // Need a query centre; skip cheaply until we have one (no slot consumed).
                 let center = self.center.lock().ok().and_then(|c| *c);
                 let (clat, clon) = match center {
                     Some(c) => c,
@@ -132,6 +110,31 @@ impl RadarSource for AdsbOnlineSource {
                         continue;
                     }
                 };
+
+                // Atomic rate claim, shared across ALL source loops (including any left over from a
+                // reconfigure): fetch only if `poll` has elapsed since the last actual fetch, and stamp
+                // the slot in the SAME lock so concurrent loops can't all slip through. This bounds
+                // outgoing requests to at most one set per poll interval no matter how many loops exist.
+                // (A previous read-then-wait gate let each loop pass on a stale read → HTTP 429.)
+                let claimed = match self.last_fetch.lock() {
+                    Ok(mut g) => {
+                        let due = g.map(|t| t.elapsed() >= self.poll).unwrap_or(true);
+                        if due {
+                            *g = Some(Instant::now());
+                        }
+                        due
+                    }
+                    Err(_) => false,
+                };
+                if !claimed {
+                    tokio::time::sleep(POLL_GRANULARITY).await;
+                    continue;
+                }
+
+                // Live radius each cycle (3D sizes the query to the visible area); fall back to config.
+                let radius_km = self.radius.lock().ok().and_then(|r| *r).unwrap_or(self.radius_km);
+                let dist_nm = (radius_km / KM_PER_NM).clamp(1.0, 250.0).round() as i64;
+
                 let now = now_ms();
                 let mut vehicles: Vec<TrackedVehicle> = Vec::new();
                 let mut statuses: Vec<AdsbProviderStatus> = Vec::with_capacity(self.providers.len());
@@ -142,6 +145,8 @@ impl RadarSource for AdsbOnlineSource {
                         .replace("{lat}", &format!("{:.5}", clat))
                         .replace("{lon}", &format!("{:.5}", clon))
                         .replace("{dist}", &dist_nm.to_string());
+                    // Verbose per-request trace (opt-in via Debug level).
+                    log::debug!("[radar][adsb] {} GET {}", p.name, url);
                     match fetch(&client, &url, p.api_key.as_deref()).await {
                         Ok(root) => {
                             let before = vehicles.len();
@@ -149,16 +154,12 @@ impl RadarSource for AdsbOnlineSource {
                             statuses.push(AdsbProviderStatus { name: p.name.clone(), count: vehicles.len() - before, ok: true });
                         }
                         Err(e) => {
-                            eprintln!("[radar][adsb] {} fetch failed: {}", p.name, e);
+                            // A rate-limit / fetch failure is tester-relevant → default-level warn so it
+                            // lands in the file log the tester sends.
+                            log::warn!("[radar][adsb] {} fetch failed: {}", p.name, e);
                             statuses.push(AdsbProviderStatus { name: p.name.clone(), count: 0, ok: false });
                         }
                     }
-                }
-
-                // Stamp the fetch time (shared) so the next cycle — and any source rebuilt by a
-                // reconfigure — spaces the next request by the poll interval.
-                if let Ok(mut g) = self.last_fetch.lock() {
-                    *g = Some(Instant::now());
                 }
 
                 // Per-provider status (counts / errors) for the panel.
