@@ -131,19 +131,23 @@ pub fn setup_portable_mode() {
     let data_dir = exe_dir.join("data");
     std::fs::create_dir_all(&data_dir).ok();
 
-    let data_str = data_dir.to_string_lossy().to_string();
+    // Underscore-prefixed: consumed only by the Windows/Linux branches below. macOS has no env-based
+    // WebView redirect (WKWebView uses WKWebsiteDataStore, set programmatically), so portable-mode
+    // WebView state is not redirected there — the DB/logs/terrain still go to `<exe>/data` via the
+    // path resolvers.
+    let _data_str = data_dir.to_string_lossy().to_string();
 
     // Windows: redirect WebView2 user-data folder
     #[cfg(target_os = "windows")]
     {
-        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &data_str);
+        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &_data_str);
     }
 
     // Linux: redirect XDG directories so WebKitGTK stores data next to the binary
     #[cfg(target_os = "linux")]
     {
-        std::env::set_var("XDG_DATA_HOME", &data_str);
-        std::env::set_var("XDG_CONFIG_HOME", &data_str);
+        std::env::set_var("XDG_DATA_HOME", &_data_str);
+        std::env::set_var("XDG_CONFIG_HOME", &_data_str);
     }
 }
 

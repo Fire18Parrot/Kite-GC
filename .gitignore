@@ -89,3 +89,6 @@ target/
 # build scripts (scripts/collect-release.*). Local per developer; never committed.
 # =============================================================================
 /release/
+
+# Bundled macOS ffmpeg sidecars — fetched at build time by scripts/fetch-ffmpeg-macos.sh
+src-tauri/binaries/

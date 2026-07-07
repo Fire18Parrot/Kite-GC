@@ -74,3 +74,12 @@ libc = "0.2"
 # whole-frame zoom can only be suppressed here. Version must match the one wry/tauri pulls (unified by Cargo).
 webkit2gtk = "2.0"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# HID / joystick input backend (hid/macos.rs) reads RAW IOKit HID elements — axes/buttons/hat by
+# usage page/usage, no gamepad projection — matching the Windows (WGI) / Linux (evdev) backends. We
+# talk to the IOKit HID Manager C API directly (declared in macos.rs, linked to the IOKit framework);
+# these two crates provide the Core Foundation types (CFString/CFNumber/CFDictionary/CFArray/CFSet)
+# used to build the device-matching dictionaries and read device properties.
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+

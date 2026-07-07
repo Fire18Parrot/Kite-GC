@@ -33,6 +33,7 @@ export const THIRD_PARTY_LICENSES: LicenseGroup[] = [
       { name: 'CesiumJS', license: 'Apache-2.0' },
       { name: 'Leaflet', license: 'BSD-2-Clause' },
       { name: 'serialport-rs', license: 'MPL-2.0' },
+      { name: 'FFmpeg — bundled on macOS, downloaded at runtime on Windows/Linux', license: 'GPL-3.0' },
       { name: 'Other Rust crates (serde, tokio, reqwest, rusqlite, …)', license: 'MIT / Apache-2.0' },
     ],
   },

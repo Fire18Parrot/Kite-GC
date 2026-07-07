@@ -122,6 +122,15 @@ fn resolve_log_dir(portable: bool) -> PathBuf {
             return PathBuf::from(home).join(".local").join("share").join("kite-gc");
         }
     }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("kite-gc");
+        }
+    }
 
     PathBuf::from(".")
 }

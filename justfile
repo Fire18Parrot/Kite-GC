@@ -43,6 +43,15 @@ build-windows:
 build-linux:
     @bash scripts/build-linux.sh
 
+# Universal macOS release build — arm64 + x86_64 .app/.dmg (only works on macOS, UNSIGNED)
+build-macos:
+    @bash scripts/build-macos.sh
+
+# Sign + notarize the built macOS bundle for distribution (macOS only; needs an Apple
+# Developer account — reads creds from your env / keychain profile, see scripts/notarize-macos.sh)
+notarize-macos:
+    @bash scripts/notarize-macos.sh
+
 # =============================================================================
 # Quality Checks
 # =============================================================================

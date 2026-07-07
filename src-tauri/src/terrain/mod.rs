@@ -485,6 +485,16 @@ fn resolve_terrain_cache_dir() -> PathBuf {
                 .join("terrain");
         }
     }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("kite-gc")
+                .join("terrain");
+        }
+    }
     PathBuf::from("terrain")
 }
 

@@ -2457,6 +2457,8 @@ dependencies = [
  "btleplug",
  "chrono",
  "chrono-tz",
+ "core-foundation",
+ "core-foundation-sys",
  "csv",
  "dirs 5.0.1",
  "evdev",
