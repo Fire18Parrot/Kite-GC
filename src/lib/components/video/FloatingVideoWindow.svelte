@@ -255,7 +255,7 @@
 {#if $videoState.floating}
   <!-- No z-index on the wrapper → no stacking context; layers compose with the top-level map. -->
   <div bind:this={floatWinEl} class="float-win" style="left:{left}px; top:{top}px; width:{width}px; height:{height}px;">
-    <!-- frosted frame background (behind), like the NavRail panels -->
+    <!-- frame background (behind) — border + shadow only; the video/map covers it (object-fit: cover) -->
     <div class="fw-bg"></div>
 
     <!-- content: the video. When the map is in this frame, it's rendered (top-level) by +page here
@@ -295,14 +295,15 @@
     /* No z-index on purpose (see script header). */
     pointer-events: none; /* layers opt back in individually */
   }
-  /* Frame background — frosted panel, same look as the NavRail floating panels */
+  /* Frame background — border + shadow only. No backdrop-filter: the video/map always covers this
+     layer (object-fit: cover), so the blur was never visible, and on WebKitGTK it triggered a
+     compositing artifact (a flickering blurry mini-copy) over the <img> MJPEG-fallback feed. */
   .fw-bg {
     position: absolute;
     inset: 0;
     z-index: 60;
     pointer-events: none;
     background: rgba(46, 46, 46, 0.92);
-    backdrop-filter: blur(12px);
     border: 1px solid rgba(55, 168, 219, 0.35);
     border-radius: 8px;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
