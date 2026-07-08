@@ -33,16 +33,13 @@
     type CameraFps,
     enumerateNativeDevices,
     setNativeDevice,
-    setNativeFormat,
     setNativeResolution,
     setNativeFramerate,
   } from '$lib/stores/video';
   import {
-    formatsFor,
     resolutionsFor,
     frameratesFor,
     resolutionLabel,
-    AUTO_FORMAT,
   } from '$lib/helpers/videoCapabilities';
   import PanelShell from '$lib/components/panel/PanelShell.svelte';
   import Button from '$lib/components/panel/Button.svelte';
@@ -189,57 +186,23 @@
   const RESOLUTIONS: VideoResolution[] = ['auto', '720p', '1080p'];
   const CAMERA_FPS: CameraFps[] = ['auto', '30', '60'];
 
-  // Native-capture cascade, derived from the probed modes (curated ∩ device).
-  const nativeFormats = $derived(formatsFor($videoState.nativeModes));
-  const nativeResolutions = $derived(
-    resolutionsFor($videoState.nativeModes, $videoState.nativeSel.format),
-  );
+  // Native-capture cascade, derived from the probed modes (curated ∩ device). Codec is not a control
+  // — getUserMedia (the primary path) picks it — so the cascade is resolution → framerate only.
+  const nativeResolutions = $derived(resolutionsFor($videoState.nativeModes));
   const nativeFramerates = $derived(
-    frameratesFor(
-      $videoState.nativeModes,
-      $videoState.nativeSel.format,
-      $videoState.nativeSel.width,
-      $videoState.nativeSel.height,
-    ),
+    frameratesFor($videoState.nativeModes, $videoState.nativeSel.width, $videoState.nativeSel.height),
   );
 
-  // Info-line frame rate. Native MJPEG (<img> multipart) fires no per-frame load event in WebView2,
-  // so we show the configured rate instead of a stuck 0; camera shows measured/negotiated.
+  // Info-line frame rate. The native getUserMedia path (and camera) show measured/negotiated; the
+  // native MJPEG fallback (<img> multipart) can't measure per-frame in WebView2 → show the configured
+  // rate instead of a stuck 0.
   const fpsText = $derived.by(() => {
     const s = $videoState;
-    if (s.kind === 'native') return String(s.nativeSel.fps);
+    if (s.kind === 'native' && s.mjpegUrl) return String(s.nativeSel.fps);
     const cur = s.mjpegUrl ? mjpegFps : measuredFps;
     const curStr = cur ? cur.toFixed(0) : '–';
     return s.frameRate ? `${curStr}/${Math.round(s.frameRate)}` : curStr;
   });
-
-  /** Friendly display name for a codec/pixel-format token. */
-  function formatLabel(codec: string): string {
-    switch (codec) {
-      case 'mjpeg':
-        return 'MJPEG';
-      case 'h264':
-        return 'H.264';
-      case 'hevc':
-        return 'H.265';
-      case 'yuyv':
-        return 'YUYV';
-      case 'nv12':
-        return 'NV12';
-      case AUTO_FORMAT:
-        return $t('video.auto');
-      default:
-        return codec.toUpperCase();
-    }
-  }
-
-  /** i18n key for the one-line format hint, or null for formats without one. */
-  function formatHintKey(codec: string): string | null {
-    if (codec === 'mjpeg') return 'video.formatHint.mjpeg';
-    if (codec === 'h264' || codec === 'hevc') return 'video.formatHint.h264';
-    if (codec === 'yuyv' || codec === 'nv12') return 'video.formatHint.raw';
-    return null;
-  }
 </script>
 
 {#snippet headerActions()}
@@ -369,20 +332,6 @@
       {#if $videoState.nativeDevices.length === 0}
         <p class="hint">{$t('video.noNativeDevices')}</p>
       {:else}
-        {@const hintKey = formatHintKey($videoState.nativeSel.format)}
-        <label class="field">
-          <span class="label">{$t('video.format')}</span>
-          <select
-            value={$videoState.nativeSel.format}
-            onchange={(e) => setNativeFormat((e.currentTarget as HTMLSelectElement).value)}
-          >
-            {#each nativeFormats as f}
-              <option value={f}>{formatLabel(f)}</option>
-            {/each}
-          </select>
-        </label>
-        {#if hintKey}<p class="hint">{$t(hintKey)}</p>{/if}
-
         <label class="field">
           <span class="label">{$t('video.resolution')}</span>
           <select

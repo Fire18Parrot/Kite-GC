@@ -2,9 +2,14 @@
 // Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 
 // Native-capture capability logic (pure). The backend `video_probe_device` returns raw device modes;
-// we intersect them with a curated FPV catalog so the picker stays short (format → resolution →
-// framerate), instead of dumping the device's full cross-product. Every catalog row is offered only
-// if the device reports it — uniform rule, no special cases. See docs (VIDEO_NATIVE_CAPTURE.md).
+// we intersect them with a curated FPV catalog so the picker stays short (resolution → framerate),
+// instead of dumping the device's full cross-product. Every catalog row is offered only if the device
+// reports it — uniform rule, no special cases. See docs (VIDEO_NATIVE_CAPTURE.md).
+//
+// Codec/pixel-format is NOT a user control: the primary render path is getUserMedia (a hardware
+// `<video>` — the only surface that doesn't contend with the map compositor), and getUserMedia picks
+// the codec itself to satisfy the requested resolution/fps. So the cascade aggregates across all of a
+// device's codecs; `modes[].codec` is retained only to compute fps ranges.
 
 /** One capture mode reported by the backend probe. Resolutions are a range (min..max); discrete
  *  devices report min === max. `fpsMax <= 0` means the framerate is unknown (V4L2 reports none). */
@@ -26,7 +31,6 @@ export interface NativeDevice {
 
 /** The user's chosen native-capture configuration. */
 export interface NativeSelection {
-  format: string; // codec token, or 'auto' when the probe couldn't enumerate formats
   width: number;
   height: number;
   fps: number;
@@ -52,50 +56,28 @@ export const FPV_CATALOG: readonly CatalogEntry[] = [
   { width: 2560, height: 1440, label: '2560×1440 (1440p)', fps: [30, 60] },
 ] as const;
 
-/** Format token used when the probe returned nothing (let ffmpeg/the OS negotiate). */
-export const AUTO_FORMAT = 'auto';
-
-/** Preference order for the format dropdown: MJPEG first (high fps), then H.264, then raw. */
-const FORMAT_ORDER = ['mjpeg', 'h264', 'hevc', 'nv12', 'yuyv'];
-
-function formatRank(codec: string): number {
-  const i = FORMAT_ORDER.indexOf(codec);
-  return i === -1 ? FORMAT_ORDER.length : i;
-}
-
 /** Does a mode's resolution range cover `w×h`? */
 function covers(m: CaptureMode, w: number, h: number): boolean {
   return w >= m.minWidth && w <= m.maxWidth && h >= m.minHeight && h <= m.maxHeight;
 }
 
-/** Distinct format tokens the device offers, in preference order. Empty probe → `['auto']`. */
-export function formatsFor(modes: CaptureMode[]): string[] {
-  if (modes.length === 0) return [AUTO_FORMAT];
-  const seen = new Set<string>();
-  for (const m of modes) seen.add(m.codec);
-  return [...seen].sort((a, b) => formatRank(a) - formatRank(b) || a.localeCompare(b));
+/** Catalog resolutions the device supports (covered by any mode). Empty probe → the full catalog (we
+ *  can't verify, so offer the sensible set and let getUserMedia negotiate). */
+export function resolutionsFor(modes: CaptureMode[]): CatalogEntry[] {
+  if (modes.length === 0) return [...FPV_CATALOG];
+  return FPV_CATALOG.filter((c) => modes.some((m) => covers(m, c.width, c.height)));
 }
 
-/** Catalog resolutions supported by `format` (any covering mode). Unknown format / empty probe →
- *  the full catalog (we can't verify, so offer the sensible set). */
-export function resolutionsFor(modes: CaptureMode[], format: string): CatalogEntry[] {
-  if (modes.length === 0 || format === AUTO_FORMAT) return [...FPV_CATALOG];
-  const forFmt = modes.filter((m) => m.codec === format);
-  return FPV_CATALOG.filter((c) => forFmt.some((m) => covers(m, c.width, c.height)));
-}
-
-/** Framerates offered for `format` at `w×h`: curated values inside the device's reported range.
- *  Unknown range (V4L2) → all curated values. Fallback: if none of the curated values fit the range,
+/** Framerates offered at `w×h`: curated values inside the device's reported range (unioned across all
+ *  codecs). Unknown range (V4L2) → all curated values. Fallback: if none of the curated values fit,
  *  offer the device's reported max so an otherwise-usable mode isn't hidden. */
-export function frameratesFor(modes: CaptureMode[], format: string, w: number, h: number): number[] {
+export function frameratesFor(modes: CaptureMode[], w: number, h: number): number[] {
   const entry = FPV_CATALOG.find((c) => c.width === w && c.height === h);
   const curated = entry ? entry.fps : [30, 60];
-  if (modes.length === 0 || format === AUTO_FORMAT) return curated;
+  if (modes.length === 0) return curated;
 
-  const covering = modes.filter((m) => m.codec === format && covers(m, w, h));
+  const covering = modes.filter((m) => covers(m, w, h));
   if (covering.length === 0) return curated;
-
-  // Unknown fps for every covering mode → offer the curated set as-is.
   if (covering.every((m) => m.fpsMax <= 0)) return curated;
 
   const lo = Math.min(...covering.filter((m) => m.fpsMin > 0).map((m) => m.fpsMin), Infinity);
@@ -103,38 +85,25 @@ export function frameratesFor(modes: CaptureMode[], format: string, w: number, h
   const inRange = curated.filter((f) => (lo === Infinity || f >= lo) && f <= hi);
   if (inRange.length > 0) return inRange;
 
-  // Nothing curated fits (rare cheap dongle) → the device's max as a single option.
   return hi > 0 ? [Math.round(hi)] : curated;
 }
 
-/** Smart default: MJPEG if present, else the top format; the highest resolution that still yields
- *  ≥30 fps; and 30 fps if available, else the highest offered. */
+/** Smart default: the highest resolution that still yields ≥30 fps; and 30 fps if available, else the
+ *  highest offered. */
 export function defaultSelection(modes: CaptureMode[]): NativeSelection {
-  const format = formatsFor(modes)[0];
-  const resolutions = resolutionsFor(modes, format);
-  // Highest-area first.
+  const resolutions = resolutionsFor(modes);
   const sorted = [...resolutions].sort((a, b) => b.width * b.height - a.width * a.height);
   const pick =
-    sorted.find((c) => frameratesFor(modes, format, c.width, c.height).some((f) => f >= 30)) ??
-    sorted[0];
-  if (!pick) return { format, width: 1280, height: 720, fps: 30 };
-  const fps = frameratesFor(modes, format, pick.width, pick.height);
-  return {
-    format,
-    width: pick.width,
-    height: pick.height,
-    fps: fps.includes(30) ? 30 : (fps[fps.length - 1] ?? 30),
-  };
+    sorted.find((c) => frameratesFor(modes, c.width, c.height).some((f) => f >= 30)) ?? sorted[0];
+  if (!pick) return { width: 1280, height: 720, fps: 30 };
+  const fps = frameratesFor(modes, pick.width, pick.height);
+  return { width: pick.width, height: pick.height, fps: fps.includes(30) ? 30 : (fps[fps.length - 1] ?? 30) };
 }
 
 /** Re-validate a selection against the available modes, correcting any field that no longer fits
- *  (cascade repair after a device/format/resolution change). Falls back to the smart default when
- *  the current format is gone entirely. */
+ *  (cascade repair after a device/resolution change). */
 export function validateSelection(modes: CaptureMode[], sel: NativeSelection): NativeSelection {
-  const formats = formatsFor(modes);
-  if (!formats.includes(sel.format)) return defaultSelection(modes);
-
-  const resolutions = resolutionsFor(modes, sel.format);
+  const resolutions = resolutionsFor(modes);
   let { width, height } = sel;
   if (!resolutions.some((c) => c.width === width && c.height === height)) {
     const top = [...resolutions].sort((a, b) => b.width * b.height - a.width * a.height)[0];
@@ -142,10 +111,9 @@ export function validateSelection(modes: CaptureMode[], sel: NativeSelection): N
     width = top.width;
     height = top.height;
   }
-
-  const fps = frameratesFor(modes, sel.format, width, height);
+  const fps = frameratesFor(modes, width, height);
   const chosenFps = fps.includes(sel.fps) ? sel.fps : fps.includes(30) ? 30 : (fps[fps.length - 1] ?? 30);
-  return { format: sel.format, width, height, fps: chosenFps };
+  return { width, height, fps: chosenFps };
 }
 
 /** Friendly label for a resolution (falls back to raw `W×H` if it isn't in the catalog). */

@@ -630,12 +630,6 @@
     "defaultDevice": "Périphérique par défaut",
     "resolution": "Résolution",
     "framerate": "Fréquence d'images",
-    "format": "Format",
-    "formatHint": {
-      "mjpeg": "MJPEG — compressé, fréquence d'images élevée",
-      "h264": "H.264 — compressé matériellement, faible latence",
-      "raw": "Raw — non compressé, limité par la bande passante"
-    },
     "auto": "Auto",
     "rtspUrl": "URL RTSP",
     "engineMissing": "Le moteur de streaming go2rtc est requis pour RTSP et n'est pas encore installé.",

@@ -641,12 +641,6 @@
     "defaultDevice": "Default device",
     "resolution": "Resolution",
     "framerate": "Frame rate",
-    "format": "Format",
-    "formatHint": {
-      "mjpeg": "MJPEG — compressed, high frame rate",
-      "h264": "H.264 — hardware-compressed, low latency",
-      "raw": "Raw — uncompressed, bandwidth-limited"
-    },
     "auto": "Auto",
     "rtspUrl": "RTSP URL",
     "engineMissing": "The go2rtc streaming engine is required for RTSP and isn't installed yet.",
