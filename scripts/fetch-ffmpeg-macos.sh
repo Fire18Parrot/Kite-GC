@@ -29,30 +29,21 @@ BIN_DIR="$ROOT/src-tauri/binaries"
 # Pinned to a specific release tag (not `latest`) so CI builds are reproducible and the bundled
 # ffmpeg binary can't change out from under us — bump this deliberately when updating ffmpeg.
 FFMPEG_STATIC_TAG="b6.1.1"
-API="https://api.github.com/repos/eugeneware/ffmpeg-static/releases/tags/${FFMPEG_STATIC_TAG}"
+# Download release assets DIRECTLY rather than resolving them through the GitHub REST API: an
+# unauthenticated api.github.com call is rate-limited to 60/h per IP and returns HTTP 403 on shared
+# CI-runner IPs (intermittent "curl: (56) … error: 403" build failures). The releases/download/ path
+# is CDN-backed and public, so it isn't subject to that limit — and the tag + asset names are pinned
+# below anyway, so the API lookup added nothing but a failure mode.
+BASE="https://github.com/eugeneware/ffmpeg-static/releases/download/${FFMPEG_STATIC_TAG}"
 
 mkdir -p "$BIN_DIR"
 
-# Resolve the download URL for a named asset from the latest release.
-asset_url() {
-    local name="$1"
-    curl -fsSL "$API" \
-        | grep -oE "\"browser_download_url\": \"[^\"]*${name}\"" \
-        | head -1 | sed 's/.*"\(https[^"]*\)"/\1/'
-}
-
 fetch_arch() {
     local asset="$1" triple="$2"
-    local url out
-    url="$(asset_url "$asset")"
-    if [ -z "$url" ]; then
-        echo "[fetch-ffmpeg] ERROR: no asset '$asset' in release $FFMPEG_STATIC_TAG ($API)"
-        exit 1
-    fi
-    out="$BIN_DIR/ffmpeg-$triple"
+    local out="$BIN_DIR/ffmpeg-$triple"
     echo "[fetch-ffmpeg] $asset -> $(basename "$out")"
     # The .gz asset is ~1/3 the size of the raw binary.
-    curl -fsSL "$url" | gunzip -c > "$out"
+    curl -fsSL "$BASE/$asset" | gunzip -c > "$out"
     chmod +x "$out"
 }
 
