@@ -21,6 +21,7 @@
     toggleVideo,
     setVideoDevice,
     setVideoResolution,
+    setCameraFps,
     setVideoMirror,
     setVideoKind,
     setRtspUrl,
@@ -29,9 +30,20 @@
     pipSupported,
     type VideoResolution,
     type VideoKind,
-    enumerateV4l2Devices,
-    setV4l2Device,
+    type CameraFps,
+    enumerateNativeDevices,
+    setNativeDevice,
+    setNativeFormat,
+    setNativeResolution,
+    setNativeFramerate,
   } from '$lib/stores/video';
+  import {
+    formatsFor,
+    resolutionsFor,
+    frameratesFor,
+    resolutionLabel,
+    AUTO_FORMAT,
+  } from '$lib/helpers/videoCapabilities';
   import PanelShell from '$lib/components/panel/PanelShell.svelte';
   import Button from '$lib/components/panel/Button.svelte';
   import Toggle from '$lib/components/panel/Toggle.svelte';
@@ -43,14 +55,10 @@
     bindVideoEl(videoEl, $videoStream);
   });
 
-  // Populate the device list when the panel opens.
+  // Populate the device lists when the panel opens.
   $effect(() => {
     void enumerateVideoDevices();
-    void enumerateV4l2Devices();
-    // If a saved session had V4L2 selected but we're not on Linux, reset to camera.
-    if (!isLinux && $videoState.kind === 'v4l2') {
-      void setVideoKind('camera');
-    }
+    void enumerateNativeDevices();
   });
 
   // ── RTSP / V4L2 dependencies ──────────────────────────────────────────
@@ -108,6 +116,8 @@
     try {
       await invoke('video_ffmpeg_download');
       await checkFfmpeg();
+      // On Windows/macOS enumeration itself needs ffmpeg — refresh the native device list now.
+      void enumerateNativeDevices();
     } catch (e) {
       ffmpegMsg = e instanceof Error ? e.message : String(e);
     } finally {
@@ -130,9 +140,8 @@
     return () => unlisteners.forEach((u) => u());
   });
 
-  // V4L2 is Linux-only (relies on /sys/class/video4linux).
-  const isLinux = typeof navigator !== 'undefined' && navigator.userAgent.includes('Linux');
-  const KINDS: VideoKind[] = isLinux ? ['camera', 'rtsp', 'v4l2'] : ['camera', 'rtsp'];
+  // Native capture is available on every OS (Linux V4L2 / Windows DirectShow / macOS AVFoundation).
+  const KINDS: VideoKind[] = ['camera', 'rtsp', 'native'];
 
   // MJPEG FPS counter — onload fires per frame in multipart streams.
   let mjpegFps = $state(0);
@@ -178,6 +187,59 @@
   });
 
   const RESOLUTIONS: VideoResolution[] = ['auto', '720p', '1080p'];
+  const CAMERA_FPS: CameraFps[] = ['auto', '30', '60'];
+
+  // Native-capture cascade, derived from the probed modes (curated ∩ device).
+  const nativeFormats = $derived(formatsFor($videoState.nativeModes));
+  const nativeResolutions = $derived(
+    resolutionsFor($videoState.nativeModes, $videoState.nativeSel.format),
+  );
+  const nativeFramerates = $derived(
+    frameratesFor(
+      $videoState.nativeModes,
+      $videoState.nativeSel.format,
+      $videoState.nativeSel.width,
+      $videoState.nativeSel.height,
+    ),
+  );
+
+  // Info-line frame rate. Native MJPEG (<img> multipart) fires no per-frame load event in WebView2,
+  // so we show the configured rate instead of a stuck 0; camera shows measured/negotiated.
+  const fpsText = $derived.by(() => {
+    const s = $videoState;
+    if (s.kind === 'native') return String(s.nativeSel.fps);
+    const cur = s.mjpegUrl ? mjpegFps : measuredFps;
+    const curStr = cur ? cur.toFixed(0) : '–';
+    return s.frameRate ? `${curStr}/${Math.round(s.frameRate)}` : curStr;
+  });
+
+  /** Friendly display name for a codec/pixel-format token. */
+  function formatLabel(codec: string): string {
+    switch (codec) {
+      case 'mjpeg':
+        return 'MJPEG';
+      case 'h264':
+        return 'H.264';
+      case 'hevc':
+        return 'H.265';
+      case 'yuyv':
+        return 'YUYV';
+      case 'nv12':
+        return 'NV12';
+      case AUTO_FORMAT:
+        return $t('video.auto');
+      default:
+        return codec.toUpperCase();
+    }
+  }
+
+  /** i18n key for the one-line format hint, or null for formats without one. */
+  function formatHintKey(codec: string): string | null {
+    if (codec === 'mjpeg') return 'video.formatHint.mjpeg';
+    if (codec === 'h264' || codec === 'hevc') return 'video.formatHint.h264';
+    if (codec === 'yuyv' || codec === 'nv12') return 'video.formatHint.raw';
+    return null;
+  }
 </script>
 
 {#snippet headerActions()}
@@ -234,7 +296,7 @@
     {#if $videoState.status === 'live'}
       <div class="info-line">
         {$videoState.width ?? '–'}×{$videoState.height ?? '–'}
-        · {$videoState.mjpegUrl ? mjpegFps.toFixed(0) : (measuredFps ? measuredFps.toFixed(0) : '–')}{#if $videoState.frameRate}/{Math.round($videoState.frameRate)}{/if} fps
+        · {fpsText} fps
       </div>
     {/if}
 
@@ -276,56 +338,83 @@
         </select>
       </label>
 
+      <label class="field">
+        <span class="label">{$t('video.framerate')}</span>
+        <select
+          value={$videoState.cameraFps}
+          onchange={(e) => setCameraFps((e.currentTarget as HTMLSelectElement).value as CameraFps)}
+        >
+          {#each CAMERA_FPS as f}
+            <option value={f}>{f === 'auto' ? $t('video.auto') : `${f} fps`}</option>
+          {/each}
+        </select>
+      </label>
+
       {#if $videoState.devices.length === 0}
         <p class="hint">{$t('video.noDevices')}</p>
       {/if}
-    {:else if $videoState.kind === 'v4l2'}
+    {:else if $videoState.kind === 'native'}
       <label class="field">
         <span class="label">{$t('video.device')}</span>
         <select
-          value={$videoState.v4l2Device ?? ''}
-          onchange={(e) => setV4l2Device((e.currentTarget as HTMLSelectElement).value || null)}
+          value={$videoState.nativeDevice ?? ''}
+          onchange={(e) => setNativeDevice((e.currentTarget as HTMLSelectElement).value || null)}
         >
-          {#each $videoState.v4l2Devices as d}
-            <option value={d.path}>{d.name} ({d.path})</option>
+          {#each $videoState.nativeDevices as d}
+            <option value={d.id}>{d.name}</option>
           {/each}
         </select>
       </label>
 
-      <label class="field">
-        <span class="label">{$t('video.resolution')}</span>
-        <select
-          value={$videoState.resolution}
-          onchange={(e) => setVideoResolution((e.currentTarget as HTMLSelectElement).value as VideoResolution)}
-        >
-          {#each RESOLUTIONS as r}
-            <option value={r}>{r === 'auto' ? $t('video.auto') : r}</option>
-          {/each}
-        </select>
-      </label>
+      {#if $videoState.nativeDevices.length === 0}
+        <p class="hint">{$t('video.noNativeDevices')}</p>
+      {:else}
+        {@const hintKey = formatHintKey($videoState.nativeSel.format)}
+        <label class="field">
+          <span class="label">{$t('video.format')}</span>
+          <select
+            value={$videoState.nativeSel.format}
+            onchange={(e) => setNativeFormat((e.currentTarget as HTMLSelectElement).value)}
+          >
+            {#each nativeFormats as f}
+              <option value={f}>{formatLabel(f)}</option>
+            {/each}
+          </select>
+        </label>
+        {#if hintKey}<p class="hint">{$t(hintKey)}</p>{/if}
 
-      {#if $videoState.v4l2Devices.length === 0}
-        <p class="hint">{$t('video.noV4l2Devices')}</p>
+        <label class="field">
+          <span class="label">{$t('video.resolution')}</span>
+          <select
+            value={`${$videoState.nativeSel.width}x${$videoState.nativeSel.height}`}
+            onchange={(e) => {
+              const [w, h] = (e.currentTarget as HTMLSelectElement).value.split('x').map(Number);
+              void setNativeResolution(w, h);
+            }}
+          >
+            {#each nativeResolutions as r}
+              <option value={`${r.width}x${r.height}`}>{resolutionLabel(r.width, r.height)}</option>
+            {/each}
+          </select>
+        </label>
+
+        <label class="field">
+          <span class="label">{$t('video.framerate')}</span>
+          <select
+            value={String($videoState.nativeSel.fps)}
+            onchange={(e) => setNativeFramerate(Number((e.currentTarget as HTMLSelectElement).value))}
+          >
+            {#each nativeFramerates as f}
+              <option value={String(f)}>{f} fps</option>
+            {/each}
+          </select>
+        </label>
       {/if}
 
-      <!-- V4L2 also needs go2rtc + ffmpeg (engine required, ffmpeg required) -->
-      {#if engineChecked && !engineVer}
+      <!-- Native capture needs ffmpeg (no go2rtc). -->
+      {#if ffmpegChecked && !ffmpegVer}
         <div class="ffmpeg-box">
-          <p class="hint">{$t('video.engineMissing')}</p>
-          {#if engineDownloading}
-            <div class="dl-row">
-              <div class="dl-bar"><div class="dl-fill" style="width:{enginePct}%"></div></div>
-              <span class="dl-pct">{enginePct}%</span>
-            </div>
-            {#if engineMsg}<p class="hint">{engineMsg}</p>{/if}
-          {:else}
-            <Button variant="data" onclick={downloadEngine}>{$t('video.engineDownload')}</Button>
-            {#if engineMsg}<p class="hint err">{engineMsg}</p>{/if}
-          {/if}
-        </div>
-      {:else if engineVer && ffmpegChecked && !ffmpegVer}
-        <div class="ffmpeg-box">
-          <p class="hint">{$t('video.ffmpegV4l2Missing')}</p>
+          <p class="hint">{$t('video.ffmpegNativeMissing')}</p>
           {#if ffmpegDownloading}
             <div class="dl-row">
               <div class="dl-bar"><div class="dl-fill" style="width:{ffmpegPct}%"></div></div>
@@ -333,7 +422,7 @@
             </div>
             {#if ffmpegMsg}<p class="hint">{ffmpegMsg}</p>{/if}
           {:else}
-            <Button variant="standard" onclick={downloadFfmpeg}>{$t('video.ffmpegFallbackDownload')}</Button>
+            <Button variant="data" onclick={downloadFfmpeg}>{$t('video.ffmpegFallbackDownload')}</Button>
             {#if ffmpegMsg}<p class="hint err">{ffmpegMsg}</p>{/if}
           {/if}
         </div>
@@ -404,9 +493,14 @@
     <Button variant="mode" active={$videoState.floating} onclick={() => toggleFloating()}>
       {$t('video.floatingWindow')}
     </Button>
-    <!-- Detached PiP window: a one-way action (can't be closed from inside the app) → plain button. -->
+    <!-- Detached PiP window: a one-way action (can't be closed from inside the app) → plain button.
+         PiP is bound to a <video>/MediaStream, so it can't carry an MJPEG (<img>) feed → disabled then. -->
     {#if pipSupported}
-      <Button variant="standard" disabled={$videoState.status !== 'live'} onclick={enterPiP}>
+      <Button
+        variant="standard"
+        disabled={$videoState.status !== 'live' || !!$videoState.mjpegUrl}
+        onclick={enterPiP}
+      >
         {$t('video.videoWindow')}
       </Button>
     {/if}

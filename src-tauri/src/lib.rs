@@ -67,8 +67,9 @@ use commands::system::system_on_battery;
 use commands::video::{
     video_ffmpeg_status, video_ffmpeg_download,
     video_go2rtc_status, video_go2rtc_download, video_webrtc_start, video_webrtc_offer,
-    video_webrtc_stop, video_list_v4l2, video_v4l2_start, video_go2rtc_port,
-    video_v4l2_mjpeg_start, video_v4l2_mjpeg_stop,
+    video_webrtc_stop, video_go2rtc_port,
+    video_list_native_devices, video_probe_device,
+    video_native_mjpeg_start, video_native_mjpeg_stop,
 };
 use video::{Go2Rtc, MjpegServer};
 use commands::logging::{set_log_level, get_log_path, log_session_settings};
@@ -411,11 +412,11 @@ pub fn run() {
             video_webrtc_start,
             video_webrtc_offer,
             video_webrtc_stop,
-            video_list_v4l2,
-            video_v4l2_start,
             video_go2rtc_port,
-            video_v4l2_mjpeg_start,
-            video_v4l2_mjpeg_stop,
+            video_list_native_devices,
+            video_probe_device,
+            video_native_mjpeg_start,
+            video_native_mjpeg_stop,
             radar_configure,
             radar_set_center,
             radar_set_node_pos,

@@ -71,6 +71,10 @@
   {#if mapHere}
     <!-- The map is overlaid here by +page (top-level). Keep an empty sized tile underneath. -->
     <div class="placeholder map-here"></div>
+  {:else if $videoState.status === 'live' && $videoState.mjpegUrl}
+    <!-- Native / MJPEG feed: an <img> multipart stream (no MediaStream). -->
+    <!-- svelte-ignore a11y_missing_attribute -->
+    <img src={$videoState.mjpegUrl} class:mirror={$videoState.mirror} />
   {:else if $videoState.status === 'live'}
     <!-- svelte-ignore a11y_media_has_caption -->
     <video
@@ -98,6 +102,7 @@
     overflow: hidden;
   }
   video,
+  img,
   .placeholder {
     width: 100%;
     height: 100%;
@@ -107,10 +112,12 @@
     display: block;
     box-sizing: border-box;
   }
-  video {
+  video,
+  img {
     object-fit: cover; /* crop to fill the 2:1 tile */
   }
-  video.mirror {
+  video.mirror,
+  img.mirror {
     transform: scaleX(-1);
   }
   .placeholder {

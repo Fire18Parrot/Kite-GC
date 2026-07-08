@@ -1,57 +1,70 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 
-// Embedded video — source router (v1: local webcam / USB capture; v2: RTSP via go2rtc;
-// v3: V4L2 native capture for Linux HDMI dongles not exposed via getUserMedia).
+// Embedded video — source router with three kinds:
+//   • camera — local webcam / USB capture via getUserMedia (the zero-dependency default).
+//   • rtsp   — network stream via the go2rtc engine (WebRTC, MJPEG fallback).
+//   • native — the OS hardware capture layer via ffmpeg (Linux V4L2 / Windows DirectShow / macOS
+//              AVFoundation) → embedded MJPEG server, rendered in an <img>. The "Advanced" tier with
+//              device-verified codec/resolution/framerate control (see helpers/videoCapabilities.ts).
 //
 // The router opens a source once and exposes its MediaStream; multiple sinks
 // (the NavRail panel preview, the dock widget, the floating window, the
 // map-swap view) bind the *same* stream to their own <video> element — a
 // MediaStream attaches to many elements at once, so one decode feeds them all.
+// (native is the exception: an MJPEG multipart feed rendered per-<img>.)
 //
-// `getUserMedia` works in both WebView2 (Windows) and WebKitGTK (Linux), so the
-// webcam path needs no backend. Network streams (RTSP/UDP via a backend
-// gstreamer pipeline) and OS-window detach are v2, layered on this same router.
-// V4L2 capture devices go through go2rtc/ffmpeg → WebRTC (same pipeline as RTSP).
+// `getUserMedia` works in WebView2 (Windows) and WebKitGTK (Linux) and, with the camera entitlement,
+// WKWebView (macOS), so the camera path needs no backend. rtsp + native use the Rust backend.
 
 import { writable, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
+import {
+  type NativeDevice,
+  type CaptureMode,
+  type NativeSelection,
+  validateSelection,
+} from '$lib/helpers/videoCapabilities';
 
 export interface VideoDevice {
   deviceId: string;
   label: string;
 }
 
-/** A V4L2 capture device discovered by the Rust backend (Linux). */
-export interface V4l2Device {
-  path: string;
-  name: string;
-  bus_info: string;
-}
-
 export type VideoStatus = 'off' | 'starting' | 'live' | 'error';
 export type VideoResolution = 'auto' | '720p' | '1080p';
-/** Source kind: local camera (MediaStream), RTSP bridge (go2rtc), or V4L2 native capture. */
-export type VideoKind = 'camera' | 'rtsp' | 'v4l2';
+/** getUserMedia framerate wish (the camera path can't enumerate modes, only hint a rate). */
+export type CameraFps = 'auto' | '30' | '60';
+/** Source kind: local camera (getUserMedia MediaStream), RTSP bridge (go2rtc), or native hardware
+ *  capture (V4L2 / DirectShow / AVFoundation → embedded MJPEG server). */
+export type VideoKind = 'camera' | 'rtsp' | 'native';
 /** Which go2rtc reader served the live RTSP feed: native client or the ffmpeg fallback. */
 export type RtspEngine = 'native' | 'ffmpeg' | null;
 /** Where the single map instance currently lives (the inverse of which surfaces show video). */
 export type MapLocation = 'main' | 'floating' | 'widget';
 
 export interface VideoState {
-  /** Active source kind. `camera` → MediaStream/`srcObject`; `rtsp` → loopback `<video src>`; `v4l2` → go2rtc/ffmpeg→WebRTC. */
+  /** Active source kind. `camera` → getUserMedia MediaStream; `rtsp` → go2rtc (WebRTC or MJPEG);
+   *  `native` → embedded MJPEG server rendered in an `<img>`. */
   kind: VideoKind;
   /** User wants video on (source open). */
   enabled: boolean;
   status: VideoStatus;
   devices: VideoDevice[];
-  /** V4L2 capture devices (Linux) — enumerated by the Rust backend. */
-  v4l2Devices: V4l2Device[];
-  /** Selected V4L2 device path (e.g. "/dev/video0"), null if none. */
-  v4l2Device: string | null;
   /** Selected video input device (null = system default). */
   deviceId: string | null;
   resolution: VideoResolution;
+  /** getUserMedia framerate wish (camera path). */
+  cameraFps: CameraFps;
+  // ── Native capture (Advanced) ────────────────────────────────────
+  /** Native capture devices (V4L2/DirectShow/AVFoundation) — enumerated by the Rust backend. */
+  nativeDevices: NativeDevice[];
+  /** Selected native device id (V4L2 path / DirectShow name / AVFoundation index), null if none. */
+  nativeDevice: string | null;
+  /** Probed modes for the selected native device (drives the format→resolution→framerate cascade). */
+  nativeModes: CaptureMode[];
+  /** Chosen native capture config (format/resolution/framerate). */
+  nativeSel: NativeSelection;
   // ── RTSP source ──────────────────────────────────────────────────
   /** RTSP URL (e.g. rtsp://192.168.1.10:554/live). */
   rtspUrl: string;
@@ -101,8 +114,13 @@ interface VideoPrefs {
   enabled: boolean;
   deviceId: string | null;
   resolution: VideoResolution;
+  cameraFps: CameraFps;
   rtspUrl: string;
-  v4l2Device: string | null;
+  nativeDevice: string | null;
+  nativeFormat: string;
+  nativeWidth: number;
+  nativeHeight: number;
+  nativeFps: number;
   mirror: boolean;
   floating: boolean;
   floatSnapped: boolean;
@@ -116,8 +134,13 @@ const PREF_DEFAULTS: VideoPrefs = {
   enabled: false,
   deviceId: null,
   resolution: 'auto',
+  cameraFps: 'auto',
   rtspUrl: '',
-  v4l2Device: null,
+  nativeDevice: null,
+  nativeFormat: 'auto',
+  nativeWidth: 1280,
+  nativeHeight: 720,
+  nativeFps: 30,
   mirror: false,
   floating: false,
   floatSnapped: true,
@@ -130,15 +153,22 @@ function loadPrefs(): VideoPrefs {
   try {
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null;
     if (raw) {
-      const p = JSON.parse(raw) as Partial<VideoPrefs>;
+      const p = JSON.parse(raw) as Partial<VideoPrefs> & { v4l2Device?: string | null };
+      // Pre-1.0 hard-switch: the old Linux-only 'v4l2' kind is now the generic 'native' kind.
+      const kind = ((p.kind as string) === 'v4l2' ? 'native' : p.kind ?? 'camera') as VideoKind;
       return {
         ...PREF_DEFAULTS,
         ...p,
-        kind: p.kind ?? 'camera',
+        kind,
         deviceId: p.deviceId ?? null,
         resolution: p.resolution ?? 'auto',
+        cameraFps: p.cameraFps ?? 'auto',
         rtspUrl: p.rtspUrl ?? '',
-        v4l2Device: p.v4l2Device ?? null,
+        nativeDevice: p.nativeDevice ?? p.v4l2Device ?? null,
+        nativeFormat: p.nativeFormat ?? 'auto',
+        nativeWidth: p.nativeWidth ?? 1280,
+        nativeHeight: p.nativeHeight ?? 720,
+        nativeFps: p.nativeFps ?? 30,
       };
     }
   } catch {
@@ -158,8 +188,13 @@ function savePrefs(): void {
         enabled: s.enabled,
         deviceId: s.deviceId,
         resolution: s.resolution,
+        cameraFps: s.cameraFps,
         rtspUrl: s.rtspUrl,
-        v4l2Device: s.v4l2Device,
+        nativeDevice: s.nativeDevice,
+        nativeFormat: s.nativeSel.format,
+        nativeWidth: s.nativeSel.width,
+        nativeHeight: s.nativeSel.height,
+        nativeFps: s.nativeSel.fps,
         mirror: s.mirror,
         floating: s.floating,
         floatSnapped: s.floatSnapped,
@@ -180,10 +215,18 @@ const INITIAL: VideoState = {
   enabled: false, // runtime flag — auto-start (below) decides whether to turn on
   status: 'off',
   devices: [],
-  v4l2Devices: [],
-  v4l2Device: boot.v4l2Device,
   deviceId: boot.deviceId,
   resolution: boot.resolution,
+  cameraFps: boot.cameraFps,
+  nativeDevices: [],
+  nativeDevice: boot.nativeDevice,
+  nativeModes: [],
+  nativeSel: {
+    format: boot.nativeFormat,
+    width: boot.nativeWidth,
+    height: boot.nativeHeight,
+    fps: boot.nativeFps,
+  },
   rtspUrl: boot.rtspUrl,
   rtspEngine: null,
   mjpegUrl: null,
@@ -231,17 +274,21 @@ export function reportVideoSize(width: number, height: number): void {
   patch({ width, height, aspect: width / height });
 }
 
-// Without a frameRate hint the browser may negotiate an uncompressed camera
-// mode (YUY2/NV12) that is USB-bandwidth-limited to a few fps at high resolution.
-// There is no way to request MJPEG directly, so we ask for a high rate (60, the
-// FPV standard): only the camera's MJPEG mode can satisfy it, nudging the browser
-// to pick it. (If the cam still won't deliver, the native backend source — v2 —
-// is the real fix.)
-const RES_CONSTRAINTS: Record<VideoResolution, MediaTrackConstraints> = {
-  auto: { frameRate: { ideal: 60 } },
-  '720p': { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } },
-  '1080p': { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
+const RES_DIMS: Record<VideoResolution, MediaTrackConstraints> = {
+  auto: {},
+  '720p': { width: { ideal: 1280 }, height: { ideal: 720 } },
+  '1080p': { width: { ideal: 1920 }, height: { ideal: 1080 } },
 };
+
+// Without a frameRate hint the browser may negotiate an uncompressed camera mode (YUY2/NV12) that is
+// USB-bandwidth-limited to a few fps at high resolution. There is no way to request MJPEG directly, so
+// a high ideal rate (60, the FPV standard) nudges the browser toward the camera's MJPEG mode. The
+// `native` source is the real fix when the browser still won't deliver. 'auto' keeps the 60 nudge; an
+// explicit 30 asks for the lower rate.
+function cameraConstraints(res: VideoResolution, fps: CameraFps): MediaTrackConstraints {
+  const ideal = fps === '30' ? 30 : 60;
+  return { ...RES_DIMS[res], frameRate: { ideal } };
+}
 
 function mediaDevicesAvailable(): boolean {
   return typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia;
@@ -259,14 +306,20 @@ async function buildMjpegUrl(): Promise<string> {
   return `http://127.0.0.1:${port}/api/stream.mjpeg?src=kite`;
 }
 
-/** Start a V4L2 device via the built-in MJPEG server (no go2rtc dependency). */
-async function startV4l2Mjpeg(device: string, width: number, height: number): Promise<string> {
-  return await invoke<string>('video_v4l2_mjpeg_start', { device, width, height });
+/** Start a native device via the built-in MJPEG server (no go2rtc dependency). */
+async function startNativeMjpeg(sel: NativeSelection, id: string): Promise<string> {
+  return await invoke<string>('video_native_mjpeg_start', {
+    id,
+    codec: sel.format,
+    width: sel.width,
+    height: sel.height,
+    fps: sel.fps,
+  });
 }
 
 /** Stop the built-in MJPEG server. */
-async function stopV4l2Mjpeg(): Promise<void> {
-  await invoke('video_v4l2_mjpeg_stop').catch(() => {});
+async function stopNativeMjpeg(): Promise<void> {
+  await invoke('video_native_mjpeg_stop').catch(() => {});
 }
 
 /** Enumerate video input devices. Labels are only populated once permission has
@@ -290,24 +343,42 @@ export async function enumerateVideoDevices(): Promise<void> {
   }
 }
 
-/** Enumerate V4L2 capture devices via the Rust backend (Linux only). */
-export async function enumerateV4l2Devices(): Promise<void> {
+/** Enumerate native capture devices via the Rust backend (V4L2/DirectShow/AVFoundation). */
+export async function enumerateNativeDevices(): Promise<void> {
   try {
-    const devices = await invoke<V4l2Device[]>('video_list_v4l2');
-    patch({ v4l2Devices: devices });
-    // Auto-select the first device if none selected yet, or drop stale.
-    const sel = get(videoState).v4l2Device;
+    const devices = await invoke<NativeDevice[]>('video_list_native_devices');
+    patch({ nativeDevices: devices });
+    // Auto-select + probe the first device if none selected yet, else (re)probe the current one; drop
+    // a stale selection.
+    const sel = get(videoState).nativeDevice;
     if (devices.length > 0) {
-      if (!sel || !devices.some((d) => d.path === sel)) {
-        patch({ v4l2Device: devices[0].path });
+      if (!sel || !devices.some((d) => d.id === sel)) {
+        await setNativeDevice(devices[0].id);
+      } else {
+        await probeNativeDevice(sel);
       }
     } else if (sel) {
-      patch({ v4l2Device: null });
+      patch({ nativeDevice: null, nativeModes: [] });
     }
-  } catch (e) {
-    // V4L2 not available on this platform — that's fine.
-    patch({ v4l2Devices: [] });
+  } catch {
+    // Native capture not available (no ffmpeg / unsupported platform) — that's fine.
+    patch({ nativeDevices: [] });
   }
+}
+
+/** Probe the selected device's supported modes and repair the current selection against them. An
+ *  empty probe (macOS / ffmpeg missing) keeps the persisted selection and the full curated catalog. */
+export async function probeNativeDevice(id: string): Promise<void> {
+  let modes: CaptureMode[] = [];
+  try {
+    modes = await invoke<CaptureMode[]>('video_probe_device', { id });
+  } catch {
+    modes = [];
+  }
+  const cur = get(videoState).nativeSel;
+  const sel = modes.length === 0 ? cur : validateSelection(modes, cur);
+  patch({ nativeModes: modes, nativeSel: sel });
+  savePrefs();
 }
 
 function stopTracks(): void {
@@ -363,7 +434,7 @@ export async function startVideo(): Promise<void> {
   patch({ kind: 'camera', enabled: true, status: 'starting', error: null });
   savePrefs(); // remember the intent immediately
   const st = get(videoState);
-  const base: MediaTrackConstraints = { ...RES_CONSTRAINTS[st.resolution] };
+  const base: MediaTrackConstraints = cameraConstraints(st.resolution, st.cameraFps);
   try {
     let stream: MediaStream;
     try {
@@ -479,29 +550,23 @@ export async function startRtsp(): Promise<void> {
   }
 }
 
-/** Open a V4L2 capture device via the built-in MJPEG server.
- *  V4L2 is Linux-only, and WebKitGTK's WebRTC support is inconsistent across
- *  distros — the self-contained MJPEG path works reliably everywhere. */
-export async function startV4l2(): Promise<void> {
+/** Open a native capture device (V4L2/DirectShow/AVFoundation) via the built-in MJPEG server. WebView
+ *  WebRTC support is inconsistent across OSes, so the self-contained MJPEG path is used everywhere. */
+export async function startNative(): Promise<void> {
   stopTracks();
   const st = get(videoState);
-  const device = st.v4l2Device;
-  if (!device) {
-    patch({ kind: 'v4l2', enabled: true, status: 'error', error: 'No V4L2 device selected' });
+  const id = st.nativeDevice;
+  if (!id) {
+    patch({ kind: 'native', enabled: true, status: 'error', error: 'No capture device selected' });
     return;
   }
-  patch({ kind: 'v4l2', enabled: true, status: 'starting', error: null, rtspEngine: null, mjpegUrl: null });
+  patch({ kind: 'native', enabled: true, status: 'starting', error: null, rtspEngine: null, mjpegUrl: null });
   savePrefs();
 
-  const dims: Record<VideoResolution, [number, number]> = {
-    auto: [1280, 720],
-    '720p': [1280, 720],
-    '1080p': [1920, 1080],
-  };
-  const [width, height] = dims[st.resolution];
+  const sel = st.nativeSel;
   try {
-    const url = await startV4l2Mjpeg(device, width, height);
-    patch({ status: 'live', mjpegUrl: url, error: null, rtspEngine: 'ffmpeg', width, height });
+    const url = await startNativeMjpeg(sel, id);
+    patch({ status: 'live', mjpegUrl: url, error: null, rtspEngine: 'ffmpeg', width: sel.width, height: sel.height });
   } catch (e) {
     patch({ status: 'error', error: e instanceof Error ? e.message : String(e), mjpegUrl: null });
   }
@@ -511,17 +576,17 @@ export async function startV4l2(): Promise<void> {
 export function startActive(): Promise<void> {
   const kind = get(videoState).kind;
   if (kind === 'rtsp') return startRtsp();
-  if (kind === 'v4l2') return startV4l2();
+  if (kind === 'native') return startNative();
   return startVideo();
 }
 
 /** Stop the source and release the camera / go2rtc engine. */
 export function stopVideo(): void {
-  const wasBackend = get(videoState).kind === 'rtsp' || get(videoState).kind === 'v4l2';
+  const wasBackend = get(videoState).kind === 'rtsp' || get(videoState).kind === 'native';
   stopTracks();
   if (wasBackend) {
     void invoke('video_webrtc_stop').catch(() => {});
-    void stopV4l2Mjpeg();
+    void stopNativeMjpeg();
   }
   patch({ enabled: false, status: 'off', error: null, rtspEngine: null, mjpegUrl: null });
   savePrefs();
@@ -547,11 +612,46 @@ export function setRtspUrl(rtspUrl: string): void {
   savePrefs();
 }
 
-/** Switch V4L2 device; restarts the stream if currently live. */
-export async function setV4l2Device(device: string | null): Promise<void> {
-  patch({ v4l2Device: device });
+/** Switch native device: probe it, repair the selection, restart if live. */
+export async function setNativeDevice(id: string | null): Promise<void> {
+  patch({ nativeDevice: id });
+  if (id) await probeNativeDevice(id);
+  else patch({ nativeModes: [] });
   savePrefs();
-  if (get(videoState).enabled && get(videoState).kind === 'v4l2') await startV4l2();
+  if (id && get(videoState).enabled && get(videoState).kind === 'native') await startNative();
+}
+
+/** Change native format (codec); re-validate resolution/framerate down the cascade; restart if live. */
+export async function setNativeFormat(format: string): Promise<void> {
+  const st = get(videoState);
+  const sel = validateSelection(st.nativeModes, { ...st.nativeSel, format });
+  patch({ nativeSel: sel });
+  savePrefs();
+  if (st.enabled && st.kind === 'native') await startNative();
+}
+
+/** Change native resolution; re-validate framerate; restart if live. */
+export async function setNativeResolution(width: number, height: number): Promise<void> {
+  const st = get(videoState);
+  const sel = validateSelection(st.nativeModes, { ...st.nativeSel, width, height });
+  patch({ nativeSel: sel });
+  savePrefs();
+  if (st.enabled && st.kind === 'native') await startNative();
+}
+
+/** Change native framerate; restart if live. */
+export async function setNativeFramerate(fps: number): Promise<void> {
+  const st = get(videoState);
+  patch({ nativeSel: { ...st.nativeSel, fps } });
+  savePrefs();
+  if (st.enabled && st.kind === 'native') await startNative();
+}
+
+/** Change the getUserMedia framerate wish (camera path); restarts the stream if currently live. */
+export async function setCameraFps(cameraFps: CameraFps): Promise<void> {
+  patch({ cameraFps });
+  savePrefs();
+  if (get(videoState).enabled && get(videoState).kind === 'camera') await startVideo();
 }
 
 /** Switch device / resolution; restarts the stream if currently live. */

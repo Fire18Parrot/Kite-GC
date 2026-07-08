@@ -11,3 +11,9 @@ const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
 
 /** True when running inside the macOS WebView (WKWebView) — used to mirror native window-control placement. */
 export const isMacOS = /Macintosh|Mac OS X/i.test(ua);
+
+/** True on the Windows WebView (WebView2) — drives the native-capture backend (DirectShow). */
+export const isWindows = /Windows/i.test(ua);
+
+/** True on the Linux WebView (WebKitGTK; excludes Android) — drives the native-capture backend (V4L2). */
+export const isLinux = /Linux/i.test(ua) && !/Android/i.test(ua);

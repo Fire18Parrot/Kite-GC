@@ -263,7 +263,11 @@
     {#if !mapHere}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="fw-body" onpointerdown={onBodyPointerDown} ondblclick={() => setMapLocation('floating')}>
-        {#if $videoState.status === 'live'}
+        {#if $videoState.status === 'live' && $videoState.mjpegUrl}
+          <!-- Native / MJPEG feed: an <img> multipart stream (no MediaStream). -->
+          <!-- svelte-ignore a11y_missing_attribute -->
+          <img src={$videoState.mjpegUrl} class:mirror={$videoState.mirror} />
+        {:else if $videoState.status === 'live'}
           <!-- svelte-ignore a11y_media_has_caption -->
           <video bind:this={videoEl} autoplay muted playsinline class:mirror={$videoState.mirror}></video>
         {:else}
@@ -317,13 +321,15 @@
   .fw-body:active {
     cursor: grabbing;
   }
-  .fw-body video {
+  .fw-body video,
+  .fw-body img {
     width: 100%;
     height: 100%;
     object-fit: cover;
     display: block;
   }
-  .fw-body video.mirror {
+  .fw-body video.mirror,
+  .fw-body img.mirror {
     transform: scaleX(-1);
   }
   .fw-ph {

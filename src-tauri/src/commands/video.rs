@@ -6,7 +6,7 @@
 
 use tauri::{AppHandle, Emitter, State};
 
-use crate::video::{ffmpeg, go2rtc, v4l2, Go2Rtc};
+use crate::video::{ffmpeg, go2rtc, native, Go2Rtc};
 
 /// Fixed go2rtc stream name for the single live feed.
 const STREAM_NAME: &str = "kite";
@@ -131,64 +131,44 @@ pub fn video_go2rtc_port(engine: State<'_, Go2Rtc>) -> Option<u16> {
     engine.port()
 }
 
-// ── V4L2 native capture (Linux) ───────────────────────────────────────
+// ── Native capture (V4L2 / DirectShow / AVFoundation) ─────────────────
 
-/// Enumerate V4L2 video capture devices (e.g. USB HDMI dongles) that the
-/// browser's `getUserMedia` may not expose. Returns an empty list on non-Linux.
+/// Enumerate native capture devices (USB/HDMI dongles etc.) for the "Advanced" source. Uses the OS
+/// hardware layer via ffmpeg (Linux V4L2, Windows DirectShow, macOS AVFoundation). Empty on
+/// unsupported platforms / when ffmpeg is missing.
 #[tauri::command]
-pub fn video_list_v4l2() -> Vec<v4l2::V4l2Device> {
-    v4l2::enumerate()
+pub fn video_list_native_devices() -> Vec<native::NativeDevice> {
+    native::list_devices()
 }
 
-/// Start a V4L2 capture device via go2rtc's ffmpeg source.
-///
-/// `device`: the V4L2 device path (e.g. "/dev/video0").
-/// `width` x `height`: capture resolution (e.g. 1280 x 720).
-///
-/// Constructs a `ffmpeg:/dev/videoN?...` source and registers it with go2rtc,
-/// then the browser negotiates WebRTC via `video_webrtc_offer` as usual.
+/// Probe a device's supported capture modes (codec + resolution range + fps range). Best-effort: V4L2
+/// reports no framerate (0 = unknown) and AVFoundation returns nothing — the frontend then falls back
+/// to the curated FPV catalog.
 #[tauri::command]
-pub async fn video_v4l2_start(
-    device: String,
-    width: u32,
-    height: u32,
-    engine: State<'_, Go2Rtc>,
-) -> Result<(), String> {
-    let port = engine.ensure_running()?;
-    let src = v4l2::ffmpeg_source(&device, width, height);
-    let client = reqwest::Client::new();
-    let resp = client
-        .put(format!("http://127.0.0.1:{port}/api/streams"))
-        .query(&[("name", STREAM_NAME), ("src", src.as_str())])
-        .send()
-        .await
-        .map_err(|e| format!("go2rtc add-stream failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("go2rtc add-stream HTTP {}", resp.status()));
-    }
-    Ok(())
+pub fn video_probe_device(id: String) -> Vec<native::CaptureMode> {
+    native::probe(&id)
 }
 
-// ── V4L2 native MJPEG server (no go2rtc/WebRTC dependency) ─────────────
-
-/// Start a lightweight embedded MJPEG HTTP server that captures from a V4L2
-/// device using ffmpeg and serves it as `multipart/x-mixed-replace`.
-/// Returns the local URL (e.g. `http://127.0.0.1:PORT/`).
-/// Kill the previous server if one was already running.
+/// Start the embedded MJPEG HTTP server capturing from a native device with the chosen mode
+/// (codec/resolution/framerate). MJPEG input is stream-copied; anything else is transcoded. Returns
+/// the local URL (`http://127.0.0.1:PORT/`), killing any previous server first.
 #[tauri::command]
-pub fn video_v4l2_mjpeg_start(
-    device: String,
+pub fn video_native_mjpeg_start(
+    id: String,
+    codec: String,
     width: u32,
     height: u32,
+    fps: u32,
     mjpeg: State<'_, crate::video::MjpegServer>,
 ) -> Result<String, String> {
-    let port = mjpeg.start(&device, width, height)?;
+    let spec = native::CaptureSpec { id, codec, width, height, fps };
+    let port = mjpeg.start(&spec)?;
     Ok(format!("http://127.0.0.1:{port}/"))
 }
 
 /// Stop the embedded MJPEG server if running.
 #[tauri::command]
-pub fn video_v4l2_mjpeg_stop(mjpeg: State<'_, crate::video::MjpegServer>) -> Result<(), String> {
+pub fn video_native_mjpeg_stop(mjpeg: State<'_, crate::video::MjpegServer>) -> Result<(), String> {
     mjpeg.stop();
     Ok(())
 }

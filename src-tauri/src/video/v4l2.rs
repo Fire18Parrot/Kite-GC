@@ -94,29 +94,3 @@ fn read_input_name(sysfs_dir: &std::path::Path) -> Option<String> {
     None
 }
 
-/// Build a go2rtc `ffmpeg:` source string for a V4L2 device.
-///
-/// Uses the MJPEG format (widely supported by capture dongles) and copies the
-/// video stream without re-encoding (`#video=copy`) for lowest latency.
-///
-/// `device`: e.g. "/dev/video0"
-/// `width` x `height`: e.g. 1280 x 720
-pub fn ffmpeg_source(device: &str, width: u32, height: u32) -> String {
-    // go2rtc ffmpeg source format:
-    //   ffmpeg:/dev/video0?video_size=1920x1080&input_format=mjpeg#video=copy
-    format!("ffmpeg:{device}?video_size={width}x{height}&input_format=mjpeg#video=copy")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ffmpeg_source_format() {
-        let src = ffmpeg_source("/dev/video0", 1920, 1080);
-        assert_eq!(
-            src,
-            "ffmpeg:/dev/video0?video_size=1920x1080&input_format=mjpeg#video=copy"
-        );
-    }
-}

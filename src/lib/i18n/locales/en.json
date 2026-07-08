@@ -635,11 +635,18 @@
     "kind": {
       "camera": "Camera (device)",
       "rtsp": "RTSP (network)",
-      "v4l2": "V4L2 / USB Capture"
+      "native": "Native Capture (Advanced)"
     },
     "device": "Video Device",
     "defaultDevice": "Default device",
     "resolution": "Resolution",
+    "framerate": "Frame rate",
+    "format": "Format",
+    "formatHint": {
+      "mjpeg": "MJPEG — compressed, high frame rate",
+      "h264": "H.264 — hardware-compressed, low latency",
+      "raw": "Raw — uncompressed, bandwidth-limited"
+    },
     "auto": "Auto",
     "rtspUrl": "RTSP URL",
     "engineMissing": "The go2rtc streaming engine is required for RTSP and isn't installed yet.",
@@ -659,8 +666,8 @@
     "pip": "Picture-in-Picture",
     "close": "Close",
     "noDevices": "No camera detected. Connect a camera or USB capture device.",
-    "noV4l2Devices": "No V4L2 capture devices found. Connect a USB HDMI dongle or other V4L2 device.",
-    "ffmpegV4l2Missing": "ffmpeg is required for V4L2 capture — it reads the raw device and feeds it to go2rtc."
+    "noNativeDevices": "No native capture devices found. Connect a USB HDMI dongle or capture card.",
+    "ffmpegNativeMissing": "ffmpeg is required for native capture — it reads the device hardware directly (V4L2 / DirectShow / AVFoundation)."
   },
   "terrain": {
     "title": "Terrain Analysis",

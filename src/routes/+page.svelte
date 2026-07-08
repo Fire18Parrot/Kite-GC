@@ -2564,17 +2564,29 @@
     <!-- Wrapper carries the inset + black backdrop; the video fills it with object-fit: contain so
          it scales to the window (full height/width) without distortion — bars where aspect differs. -->
     <div class="map-video-wrap">
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <!-- svelte-ignore a11y_media_has_caption -->
-      <video
-        class="map-video"
-        class:mirror={$videoState.mirror}
-        bind:this={mapVideoEl}
-        autoplay
-        muted
-        playsinline
-        ondblclick={() => setMapLocation('main')}
-      ></video>
+      {#if $videoState.mjpegUrl}
+        <!-- Native / MJPEG feed: an <img> multipart stream (no MediaStream). -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!-- svelte-ignore a11y_missing_attribute -->
+        <img
+          class="map-video"
+          class:mirror={$videoState.mirror}
+          src={$videoState.mjpegUrl}
+          ondblclick={() => setMapLocation('main')}
+        />
+      {:else}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!-- svelte-ignore a11y_media_has_caption -->
+        <video
+          class="map-video"
+          class:mirror={$videoState.mirror}
+          bind:this={mapVideoEl}
+          autoplay
+          muted
+          playsinline
+          ondblclick={() => setMapLocation('main')}
+        ></video>
+      {/if}
     </div>
   {/if}
 

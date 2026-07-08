@@ -1,18 +1,34 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 
-//! Embedded MJPEG-over-HTTP server for V4L2 capture devices.
+//! Embedded MJPEG-over-HTTP server for native capture devices (V4L2 / DirectShow / AVFoundation).
 //!
-//! Spawns `ffmpeg -f v4l2 … -f mpjpeg -` and serves its stdout as a
-//! `multipart/x-mixed-replace` HTTP stream on a local port. The frontend
-//! renders this directly in an `<img>` tag — no WebRTC or go2rtc needed.
+//! Spawns `ffmpeg -f <demuxer> … -f mpjpeg -` and **broadcasts** its stdout to every connected HTTP
+//! client as a `multipart/x-mixed-replace` stream on a local port. Multiple sinks (panel preview,
+//! floating window, dock widget) each open their own `<img>` on the same URL — one ffmpeg
+//! decode/transcode fans out to all of them. The per-OS input + codec handling lives in
+//! `video/native.rs`.
+//!
+//! Sockets get `TCP_NODELAY` and ffmpeg flushes per packet, so localhost delivery isn't bunched by
+//! Nagle/output buffering (which shows up as sporadic stutter, worse at 60 fps).
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStderr, Command, Stdio};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+/// Drop a client that can't accept data within this window — prevents one stalled `<img>` (e.g. an
+/// occluded/throttled view) from blocking the shared broadcast (and back-pressuring ffmpeg).
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The multipart HTTP response preamble sent once per client before the frame stream.
+const HTTP_HEADERS: &[u8] = b"HTTP/1.1 200 OK\r\n\
+    Content-Type: multipart/x-mixed-replace; boundary=ffmpeg\r\n\
+    Cache-Control: no-cache\r\n\
+    Connection: close\r\n\
+    \r\n";
 
 #[derive(Default)]
 pub struct MjpegServer {
@@ -22,7 +38,9 @@ pub struct MjpegServer {
 struct Running {
     ffmpeg: Child,
     shutdown: Arc<AtomicBool>,
-    _thread: JoinHandle<()>,
+    _accept: JoinHandle<()>,
+    _reader: JoinHandle<()>,
+    _stderr: JoinHandle<()>,
 }
 
 impl MjpegServer {
@@ -30,14 +48,14 @@ impl MjpegServer {
         Self::default()
     }
 
-    /// Start the MJPEG server. Spawns ffmpeg to capture from a V4L2 device and
-    /// output MJPEG, then pipes its stdout to HTTP clients. Returns the port.
-    pub fn start(&self, device: &str, width: u32, height: u32) -> Result<u16, String> {
+    /// Start the MJPEG server. Spawns ffmpeg to capture from a native device per `spec` and output
+    /// MJPEG (stream-copied when the input is already MJPEG, transcoded otherwise), then broadcasts its
+    /// stdout to all connected HTTP clients. Returns the port.
+    pub fn start(&self, spec: &super::native::CaptureSpec) -> Result<u16, String> {
         self.stop();
 
-        let listener =
-            TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind: {e}"))?;
-        // Non-blocking so we can break out of accept() on shutdown.
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind: {e}"))?;
+        // Non-blocking so the accept loop can break out on shutdown.
         listener.set_nonblocking(true).map_err(|e| format!("set_nonblocking: {e}"))?;
         let port = listener.local_addr().map_err(|e| format!("addr: {e}"))?.port();
 
@@ -47,35 +65,61 @@ impl MjpegServer {
         let ffmpeg_bin = super::ffmpeg::find_ffmpeg()
             .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
 
-        let mut ffmpeg = Command::new(&ffmpeg_bin)
-            .args([
-                "-loglevel", "error",
-                "-f", "v4l2",
-                "-input_format", "mjpeg",
-                "-video_size", &format!("{width}x{height}"),
-                "-i", device,
-                "-c", "copy",
-                "-f", "mpjpeg",
-                "-",
-            ])
+        // Build: [loglevel] + per-OS input (native) + output codec + mpjpeg mux (flushing per packet).
+        // `-fflags nobuffer` (an input option, so it precedes the demuxer/-i) cuts input-side buffering
+        // for lower latency and tighter pacing on live capture.
+        let mut args: Vec<String> = vec![
+            "-loglevel".into(),
+            "error".into(),
+            "-fflags".into(),
+            "nobuffer".into(),
+        ];
+        args.extend(super::native::input_args(spec));
+        if super::native::needs_transcode(&spec.codec) {
+            // Raw / H.264 / auto → re-encode to MJPEG for the multipart sink.
+            args.extend(["-c:v".into(), "mjpeg".into(), "-q:v".into(), "5".into()]);
+        } else {
+            args.extend(["-c".into(), "copy".into()]);
+        }
+        // Emit each packet immediately (no output buffering) → even, low-jitter frame delivery.
+        args.extend(["-flush_packets".into(), "1".into(), "-f".into(), "mpjpeg".into(), "-".into()]);
+
+        let mut cmd = Command::new(&ffmpeg_bin);
+        cmd.args(&args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .stdin(Stdio::null())
+            .stderr(Stdio::piped()) // capture ffmpeg errors for the log (tester diagnostics)
+            .stdin(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW — don't flash a console
+        }
+        let mut ffmpeg = cmd
             .spawn()
             .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
 
-        let mut stdout = ffmpeg.stdout.take().ok_or("no stdout")?;
+        let stdout = ffmpeg.stdout.take().ok_or("no stdout")?;
+        let stderr = ffmpeg.stderr.take();
         let shutdown = Arc::new(AtomicBool::new(false));
-        let shutdown_flag = shutdown.clone();
+        let clients: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let handle = thread::spawn(move || {
-            serve_mjpeg(listener, &mut stdout, &shutdown_flag);
-        });
+        let accept = {
+            let clients = clients.clone();
+            let shutdown = shutdown.clone();
+            thread::spawn(move || accept_loop(listener, clients, shutdown))
+        };
+        let reader = {
+            let shutdown = shutdown.clone();
+            thread::spawn(move || broadcast_loop(stdout, clients, shutdown))
+        };
+        let stderr_thread = thread::spawn(move || log_ffmpeg_stderr(stderr));
 
         self.inner.lock().unwrap().replace(Running {
             ffmpeg,
             shutdown,
-            _thread: handle,
+            _accept: accept,
+            _reader: reader,
+            _stderr: stderr_thread,
         });
         Ok(port)
     }
@@ -83,13 +127,13 @@ impl MjpegServer {
     pub fn stop(&self) {
         let mut guard = self.inner.lock().unwrap();
         if let Some(mut r) = guard.take() {
-            // Signal the server thread to stop, then wait for it.
+            // Signal both threads, then kill ffmpeg — closing stdout unblocks the reader's read().
             r.shutdown.store(true, Ordering::SeqCst);
-            // Kill ffmpeg — this closes stdout, which unblocks the server thread's read.
             let _ = r.ffmpeg.kill();
             let _ = r.ffmpeg.wait();
-            // Wait up to 2 seconds for the server thread to finish.
-            let _ = r._thread.join();
+            let _ = r._reader.join();
+            let _ = r._accept.join();
+            let _ = r._stderr.join();
             log::info!("MJPEG server stopped");
         }
     }
@@ -101,51 +145,72 @@ impl Drop for MjpegServer {
     }
 }
 
-/// Accept clients in a loop, serving the MJPEG stream to one client at a time.
-/// Exits when `shutdown` is set or ffmpeg dies (stdout EOF).
-fn serve_mjpeg(
-    listener: TcpListener,
-    stdout: &mut impl Read,
-    shutdown: &AtomicBool,
-) {
+/// Accept clients and register them for broadcast. Each gets the multipart preamble, `TCP_NODELAY`
+/// (no Nagle bunching on localhost), and blocking writes. Exits when `shutdown` is set.
+fn accept_loop(listener: TcpListener, clients: Arc<Mutex<Vec<TcpStream>>>, shutdown: Arc<AtomicBool>) {
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
         match listener.accept() {
-            Ok((stream, _)) => {
-                if shutdown.load(Ordering::SeqCst) {
-                    break;
+            Ok((mut stream, _)) => {
+                let _ = stream.set_nodelay(true);
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
+                if stream.write_all(HTTP_HEADERS).is_ok() && stream.flush().is_ok() {
+                    clients.lock().unwrap().push(stream);
                 }
-                serve_client(stream, stdout);
-                // After client disconnects, loop to accept another (reconnect).
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No connection pending — check shutdown flag and retry.
                 thread::sleep(Duration::from_millis(100));
-                continue;
             }
             Err(_) => break,
         }
     }
 }
 
-fn serve_client(mut stream: TcpStream, stdout: &mut impl Read) {
-    let _ = stream.write_all(
-        b"HTTP/1.1 200 OK\r\n\
-          Content-Type: multipart/x-mixed-replace; boundary=ffmpeg\r\n\
-          Cache-Control: no-cache\r\n\
-          Connection: close\r\n\
-          \r\n",
-    );
-    let _ = stream.flush();
+/// Read ffmpeg's stdout and write each chunk to every connected client, dropping clients that error
+/// (disconnected `<img>`). Always drains stdout even with no clients so ffmpeg never blocks on a full
+/// pipe. Exits on EOF (ffmpeg died) or shutdown.
+fn broadcast_loop(mut stdout: impl Read, clients: Arc<Mutex<Vec<TcpStream>>>, shutdown: Arc<AtomicBool>) {
     let mut buf = [0u8; 65536];
-    while let Ok(n) = stdout.read(&mut buf) {
-        if n == 0 {
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        if stream.write_all(&buf[..n]).is_err() {
-            break;
+        let n = match stdout.read(&mut buf) {
+            Ok(0) => {
+                // stdout EOF = ffmpeg exited. If we didn't ask it to stop, that's the "goes black"
+                // failure — surface it (the stderr logger prints ffmpeg's reason just above).
+                if !shutdown.load(Ordering::SeqCst) {
+                    log::warn!("[video] native MJPEG source ended unexpectedly (ffmpeg exited)");
+                }
+                break;
+            }
+            Ok(n) => n,
+            Err(e) => {
+                if !shutdown.load(Ordering::SeqCst) {
+                    log::warn!("[video] native MJPEG read error: {e}");
+                }
+                break;
+            }
+        };
+        let mut list = clients.lock().unwrap();
+        if list.is_empty() {
+            continue; // stdout already drained above
+        }
+        list.retain_mut(|c| c.write_all(&buf[..n]).is_ok());
+    }
+}
+
+/// Forward ffmpeg's stderr to the log. With `-loglevel error` these are genuine errors (device lost,
+/// corrupt frame, codec failure) → tester-relevant, so they go at the default-visible `warn` level.
+fn log_ffmpeg_stderr(stderr: Option<ChildStderr>) {
+    let Some(stderr) = stderr else { return };
+    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+        let line = line.trim();
+        if !line.is_empty() {
+            log::warn!("[video][ffmpeg] {line}");
         }
     }
 }

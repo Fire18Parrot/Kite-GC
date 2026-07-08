@@ -635,11 +635,18 @@
     "kind": {
       "camera": "Kamera (Gerät)",
       "rtsp": "RTSP (Netzwerk)",
-      "v4l2": "V4L2 / USB-Capture"
+      "native": "Native Capture (Erweitert)"
     },
     "device": "Video-Gerät",
     "defaultDevice": "Standardgerät",
     "resolution": "Auflösung",
+    "framerate": "Bildrate",
+    "format": "Format",
+    "formatHint": {
+      "mjpeg": "MJPEG – komprimiert, hohe Bildrate",
+      "h264": "H.264 – hardware-komprimiert, niedrige Latenz",
+      "raw": "Raw – unkomprimiert, bandbreitenlimitiert"
+    },
     "auto": "Auto",
     "rtspUrl": "RTSP-URL",
     "engineMissing": "Die Streaming-Engine go2rtc wird für RTSP benötigt und ist noch nicht installiert.",
@@ -659,8 +666,8 @@
     "pip": "Bild-im-Bild",
     "close": "Schließen",
     "noDevices": "Keine Kamera erkannt. Kamera oder USB-Capture-Gerät anschließen.",
-    "noV4l2Devices": "Keine V4L2-Capture-Geräte gefunden. USB-HDMI-Dongle oder anderes V4L2-Gerät anschließen.",
-    "ffmpegV4l2Missing": "ffmpeg wird für V4L2-Capture benötigt – liest das Rohgerät und leitet es an go2rtc weiter."
+    "noNativeDevices": "Keine nativen Capture-Geräte gefunden. USB-HDMI-Dongle oder Capture-Karte anschließen.",
+    "ffmpegNativeMissing": "ffmpeg wird für Native Capture benötigt – spricht die Gerätehardware direkt an (V4L2 / DirectShow / AVFoundation)."
   },
   "terrain": {
     "title": "Geländeanalyse",
