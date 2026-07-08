@@ -318,19 +318,26 @@ async function stopNativeMjpeg(): Promise<void> {
   await invoke('video_native_mjpeg_stop').catch(() => {});
 }
 
-/** Normalize a device name/label for cross-API matching (OS device name ↔ getUserMedia label). */
+/** Normalize a device name/label for cross-API matching (OS device name ↔ getUserMedia label). Drops
+ *  parenthesised suffixes (USB ids like "(046d:0825)", bus paths) and non-alphanumerics, which differ
+ *  wildly between the V4L2 sysfs name and the WebKitGTK/Chromium label for the same camera. */
 function normalizeDeviceName(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, ' ').trim();
+  return s
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-/** Map a probed native device to a getUserMedia `deviceId` by matching its OS name to a camera label.
- *  Returns null if getUserMedia can't expose the device (→ the caller uses the ffmpeg/MJPEG fallback).
- *  Bootstraps a one-off permission grant if labels aren't populated yet. */
+/** Map a probed native device to a getUserMedia `deviceId` so we can stream it through the clean
+ *  hardware `<video>` path. Returns null only when getUserMedia genuinely can't expose the device
+ *  (→ the caller uses the ffmpeg/MJPEG fallback). Bootstraps a one-off permission grant if labels
+ *  aren't populated yet. */
 async function findGetUserMediaId(nativeId: string): Promise<string | null> {
   if (!mediaDevicesAvailable()) return null;
   const dev = get(videoState).nativeDevices.find((d) => d.id === nativeId);
   const want = dev ? normalizeDeviceName(dev.name) : '';
-  if (!want) return null;
 
   const inputs = async () =>
     (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
@@ -345,13 +352,24 @@ async function findGetUserMediaId(nativeId: string): Promise<string | null> {
       return null;
     }
   }
-  const exact = cams.find((c) => normalizeDeviceName(c.label) === want);
-  if (exact) return exact.deviceId;
-  const partial = cams.find((c) => {
-    const l = normalizeDeviceName(c.label);
-    return l && (l.includes(want) || want.includes(l));
+
+  let match = want
+    ? (cams.find((c) => normalizeDeviceName(c.label) === want) ??
+       cams.find((c) => {
+         const l = normalizeDeviceName(c.label);
+         return l && (l.includes(want) || want.includes(l));
+       }))
+    : undefined;
+  // Robust fallback: a single-camera system (the laptop case) is unambiguous even when the V4L2 name
+  // and the getUserMedia label don't textually match — the name formats differ a lot on Linux.
+  if (!match && cams.length === 1 && cams[0].deviceId) match = cams[0];
+
+  console.log('[video] native→getUserMedia match', {
+    want,
+    labels: cams.map((c) => c.label),
+    matched: match?.label ?? null,
   });
-  return partial?.deviceId ?? null;
+  return match?.deviceId ?? null;
 }
 
 /** Open a native device through getUserMedia with exact resolution/framerate (a hardware `<video>`
