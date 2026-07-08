@@ -248,6 +248,11 @@ fn parse_avf_devices(stderr: &str) -> Vec<NativeDevice> {
             continue;
         }
         if let Some((idx, name)) = avf_index_line(line) {
+            // AVFoundation lists "Capture screen N" (screen grab) among the video devices — not a
+            // real camera, so keep it out of the capture picker.
+            if name.to_ascii_lowercase().starts_with("capture screen") {
+                continue;
+            }
             out.push(NativeDevice { id: idx, name });
         }
     }
@@ -482,9 +487,12 @@ mod tests {
 [AVFoundation indev @ 0x7f] AVFoundation video devices:
 [AVFoundation indev @ 0x7f] [0] FaceTime HD Camera
 [AVFoundation indev @ 0x7f] [1] USB Capture HDMI
+[AVFoundation indev @ 0x7f] [2] Capture screen 0
 [AVFoundation indev @ 0x7f] AVFoundation audio devices:
 [AVFoundation indev @ 0x7f] [0] Built-in Microphone";
         let d = parse_avf_devices(s);
+        // Two real cameras kept; the screen-capture pseudo-device dropped. "USB Capture HDMI" (a
+        // capture card, not a screen grab) must survive.
         assert_eq!(d.len(), 2);
         assert_eq!(d[0].id, "0");
         assert_eq!(d[1].name, "USB Capture HDMI");
