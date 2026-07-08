@@ -10,6 +10,10 @@ place, see the **[Video guide](../guides/video.md)**.
 - **Close other apps using it.** A webcam or capture card can usually be opened by **one app at a time**;
   quit anything else holding it (OBS, a browser tab, another GCS).
 - **Check OS permissions.** The operating system may need to grant camera access to Kite.
+- **Try Native Capture (Advanced).** Some capture devices — notably certain USB HDMI dongles, especially
+  on Linux — aren't exposed to the ordinary **Camera** list but *are* reachable through **Native Capture
+  (Advanced)**. Switch the source kind and reopen the device dropdown. (Native Capture uses the **ffmpeg**
+  helper, which Kite downloads automatically the first time.)
 
 ## An RTSP stream won't start
 

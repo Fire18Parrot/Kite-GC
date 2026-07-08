@@ -1,30 +1,55 @@
 # Video
 
-Kite can show a live video feed alongside (or behind) the map — an **RTSP stream** from an FPV/video
-link, or a **local capture device** such as a webcam or USB capture card. Open it from the **Video** tool
-on the navigation rail.
+Kite can show a live video feed alongside (or behind) the map — a **local capture device** such as a
+webcam or USB capture card, or an **RTSP stream** from a network video source. Open it from the
+**Video** tool on the navigation rail.
 
-## Setting up a source
+## Choosing a source
 
-Pick the **source kind** and start it:
+Pick the **source kind** from the dropdown, set it up, then **Start** / **Stop** the feed. Your choice
+is remembered between sessions.
 
-- **Camera** — choose a local capture device from the dropdown (webcams and capture cards are listed
-  automatically).
-- **RTSP** — enter the stream URL (e.g. from your video receiver or an RTSP server).
-
-You can set the **resolution** (auto / 720p / 1080p) and **mirror** the image horizontally (handy for
-front-facing cameras), then **Start** / **Stop** the feed. Your source choice is remembered between
-sessions.
+- **Camera (device)** — a local capture device opened the simple way, through the system's built-in
+  camera access. Choose a device from the dropdown (webcams and capture cards the system exposes are
+  listed automatically). No extra downloads.
+- **Native Capture (Advanced)** — a local capture device opened via Kite's capture engine for **more
+  control and wider device support**. See the comparison below.
+- **RTSP (network)** — enter the stream URL (e.g. from your video receiver or an RTSP server).
 
 ![The Video panel](../assets/guides/video/video_panel.png)
 /// caption
-The Video panel — source kind, device / RTSP URL, resolution and mirror, with Start/Stop.
+The Video panel — source kind, device / RTSP URL, resolution, frame rate and mirror, with Start/Stop.
 ///
 
-!!! note "RTSP helpers download themselves"
-    RTSP playback uses a small bundled engine (**go2rtc**), with **ffmpeg** as a fallback reader for
-    streams it can't read natively. Kite downloads whichever it needs **automatically** the first time
-    you start an RTSP source — no manual install. Local cameras need nothing extra.
+### Camera (device) vs Native Capture — which should I use?
+
+Both play a local capture device; they differ in **how** they open it.
+
+| | **Camera (device)** | **Native Capture (Advanced)** |
+|---|---|---|
+| Setup | Nothing to install | Needs the **ffmpeg** helper (downloaded automatically) |
+| Device list | What the system exposes to apps | Read directly from the capture hardware — **can find devices the Camera list doesn't show** (e.g. some USB HDMI capture dongles) |
+| Resolution / frame rate | A **request** — Auto / 720p / 1080p and an optional 30 / 60 fps wish; the camera picks the closest mode it supports | **Device-verified** — only the resolutions and frame rates your device actually reports (from a curated FPV set: SD PAL/NTSC, 480p, 720p, 1080p, 1440p) |
+| Codec | Chosen automatically | Chosen automatically to hit the selected resolution/frame rate |
+
+**Start with Camera (device).** Switch to **Native Capture (Advanced)** if your device isn't listed
+under Camera, or when you want to pin an exact resolution / frame rate that the device confirms it
+supports. Both deliver the same smooth, hardware-accelerated picture for devices the system can open;
+Native additionally reaches devices that only the capture engine can see.
+
+### Resolution, frame rate and mirror
+
+- **Resolution** — Camera offers Auto / 720p / 1080p; Native offers the device-verified list.
+- **Frame rate** — Camera offers Auto / 30 / 60 fps; Native offers the frame rates the device reports
+  for the chosen resolution.
+- **Mirror** — flip the image horizontally (handy for front-facing cameras). Applies to every place the
+  feed is shown.
+
+!!! note "Helpers download themselves"
+    **Camera (device)** needs nothing extra. **Native Capture** uses the bundled **ffmpeg** engine, and
+    **RTSP** uses **go2rtc** (with ffmpeg as a fallback reader for streams it can't read natively). Kite
+    downloads whichever it needs **automatically** the first time you use that source — no manual
+    install. On macOS these are shipped with the app.
 
 ## Where the video shows
 
@@ -39,7 +64,8 @@ The same feed can appear in several places at once (they all share one stream):
 - **In a detached window** — a separate, free-floating **OS window** you can place anywhere, including
   **outside the app** or on a second monitor. Opened from the Video panel; because it lives outside the
   app it's closed from the OS (not from inside Kite), and — unlike the floating window — it **can't host
-  the map** (no swap).
+  the map** (no swap). It's also the **lightest** option: the OS draws it directly, so on low-power
+  systems using only the detached window keeps GPU load to a minimum.
 
 ![The floating video window and the video widget](../assets/guides/video/video_floating_widget.png)
 /// caption
