@@ -372,23 +372,28 @@ async function findGetUserMediaId(nativeId: string): Promise<string | null> {
   return match?.deviceId ?? null;
 }
 
-/** Open a native device through getUserMedia with exact resolution/framerate (a hardware `<video>`
- *  MediaStream). Softens the fps constraint on OverconstrainedError (drivers report fps differently
- *  than ffmpeg); the resolution stays exact. Throws if the device/constraints can't be satisfied. */
+/** Open a native device through getUserMedia (a hardware `<video>` MediaStream). Degrades gracefully:
+ *  `exact` resolution/framerate first (honour the selection on Chromium/WebView2), then `ideal`
+ *  (WebKitGTK's getUserMedia throws OverconstrainedError on `exact` it can't meet 1:1 — `ideal` is
+ *  what the plain camera path uses and never throws), then a bare device open. Throws only if every
+ *  attempt fails. */
 async function getNativeUserMedia(deviceId: string, sel: NativeSelection): Promise<MediaStream> {
-  const base: MediaTrackConstraints = {
-    deviceId: { exact: deviceId },
-    width: { exact: sel.width },
-    height: { exact: sel.height },
-  };
-  try {
-    return await navigator.mediaDevices.getUserMedia({ video: { ...base, frameRate: { exact: sel.fps } }, audio: false });
-  } catch (e) {
-    if (e instanceof Error && e.name === 'OverconstrainedError') {
-      return await navigator.mediaDevices.getUserMedia({ video: { ...base, frameRate: { ideal: sel.fps } }, audio: false });
+  const dev: ConstrainDOMString = { exact: deviceId };
+  const attempts: MediaTrackConstraints[] = [
+    { deviceId: dev, width: { exact: sel.width }, height: { exact: sel.height }, frameRate: { exact: sel.fps } },
+    { deviceId: dev, width: { ideal: sel.width }, height: { ideal: sel.height }, frameRate: { ideal: sel.fps } },
+    { deviceId: dev },
+  ];
+  let lastErr: unknown;
+  for (const video of attempts) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ video, audio: false });
+    } catch (e) {
+      lastErr = e;
+      console.warn('[video] native getUserMedia attempt failed', video, e);
     }
-    throw e;
   }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 /** Enumerate video input devices. Labels are only populated once permission has
