@@ -74,16 +74,18 @@ Kite writes a plain-text log you can hand back when something won't connect.
 3. Reproduce the failed connection.
 4. Click **Log File → Open Folder** and grab the log.
 
-The log lives in your app-data folder and the previous run is always kept alongside it:
+The log lives in your app-data folder:
 
 | | Location |
 |---|---|
-| **Windows** | `%APPDATA%\kite-gc\kite-gc.log` |
-| **Linux** | `~/.local/share/kite-gc/kite-gc.log` |
-| **Portable** | `data\kite-gc.log` (next to the executable) |
+| **Windows** | `%APPDATA%\kite-gc\` |
+| **Linux** | `~/.local/share/kite-gc/` |
+| **macOS** | `~/Library/Application Support/kite-gc/` |
+| **Portable** | `data\` (next to the executable) |
 
-The prior session is rotated to `kite-gc.log.prev`, so a failure you only notice after restarting Kite
-isn't lost.
+Kite writes **one file per day** — `kite-gc-YYYY-MM-DD.log` — appending each session under a header block
+and keeping the last **30 days** (older files are pruned on startup), so a failure you only notice after
+restarting Kite isn't lost. **Log File → Open Folder** takes you straight there.
 
 !!! tip "Sharing a log"
     The log contains port names and firmware/version strings but no personal data. Attach it to a

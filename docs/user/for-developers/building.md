@@ -1,8 +1,8 @@
 # Building from source
 
 How to set up a development environment and build Kite Ground Control yourself. The project uses
-**[just](https://github.com/casey/just)** as its task runner for a consistent interface across Windows
-and Linux.
+**[just](https://github.com/casey/just)** as its task runner for a consistent interface across Windows,
+Linux and macOS.
 
 !!! note "Heavy system dependencies are manual"
     The toolchains and system libraries below must be installed **manually** — they need administrative
@@ -47,6 +47,16 @@ sudo apt install -y \
     `libwebkit2gtk-4.1-dev` is the Tauri 2 / WebKitGTK 4.1 package — you need a distro new enough to
     ship 4.1 (Ubuntu 22.04+ / Debian 12+). Install Node.js, Rust and just via their official methods.
 
+### macOS
+
+1. **Xcode Command Line Tools** — `xcode-select --install` (compiler / linker + SDK).
+2. Node.js, Rust and just via their official installers (e.g. `brew install node just`, Rust from rustup).
+
+The macOS build is **universal** (arm64 + x86_64). `just build-macos` adds both Rust targets and fetches
+the bundled ffmpeg for you, then builds the `.app` + `.dmg`. The result is **unsigned**; `just
+notarize-macos` signs + notarizes it for distribution without a Gatekeeper prompt (needs an Apple
+Developer account, credentials read from your environment / keychain — never committed).
+
 ### Android
 Android support (Tauri Mobile) was experimented with but is **on hold** — it needs a separate UI and
 build pipeline. Don't run `tauri android init`; it isn't supported right now.
@@ -66,6 +76,7 @@ just check           # svelte-check + cargo check
 just build           # production build for the current platform
 just build-windows   # explicit Windows release build
 just build-linux     # explicit Linux release build
+just build-macos     # explicit macOS universal build (unsigned; adds mac targets + ffmpeg)
 just clean           # clean build artifacts
 ```
 
@@ -73,11 +84,18 @@ The classic commands still work too (`npm install`, `npm run tauri dev`, `npm ru
 
 ### Build outputs
 
-Every build (`just build` / `build-windows` / `build-linux`) gathers its final artifacts into a
-**`release/`** folder at the repo root, so you don't have to dig through `target/release/bundle/`:
+Every build (`just build` / `build-windows` / `build-linux` / `build-macos`) gathers its final artifacts
+into a **`release/`** folder at the repo root, renamed to a unified scheme so local builds match the CI
+release builds:
 
-- **Windows:** the standalone `kite-gc.exe`, the NSIS `*-setup.exe` installer and the `*.msi`.
-- **Linux:** the standalone `kite-gc` binary plus the `*.deb`, `*.AppImage` and `*.rpm` packages.
+```
+KiteGC_<OS>_<arch>_<version>_<type>.<ext>
+```
+
+- **Type** = `installer` (`.exe` / `.deb` / `.rpm` / `.dmg`), `standalone` (`.AppImage`, or the macOS
+  `.app` zipped), or `portable` (the bare executable zipped **with an empty `.portable` marker**).
+- The naming logic lives in `scripts/collect-release.*` and is shared by local builds and the GitHub
+  release workflow (`.github/workflows/release.yml`), so filenames match everywhere.
 
 The folder is refreshed on each build and is git-ignored (local to your machine). The raw outputs also
 remain in `src-tauri/target/release/` (and its `bundle/` subfolders) as usual.

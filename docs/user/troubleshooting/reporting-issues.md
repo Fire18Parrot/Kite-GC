@@ -28,7 +28,7 @@ The more of this you provide, the quicker it can be diagnosed:
    ```
 4. **Your environment:**
     - **Kite version** (shown in the top bar, and under **About** in Settings).
-    - **Operating system** and version (Windows / Linux, and which).
+    - **Operating system** and version (Windows / Linux / macOS, and which).
     - **Autopilot and firmware version** — INAV / ArduPilot / PX4 and the exact version.
     - **Connection type** — USB serial, Bluetooth (SPP / BLE), TCP or UDP.
 5. **Screenshots or a short screen recording** — especially for anything visual (map, widgets, 3D).
