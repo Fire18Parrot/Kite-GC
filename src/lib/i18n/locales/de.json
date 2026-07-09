@@ -652,6 +652,10 @@
       "native": "Stream: go2rtc (nativ)",
       "ffmpeg": "Stream: ffmpeg-Fallback"
     },
+    "pipeline": {
+      "hw": "Hardware",
+      "sw": "Software"
+    },
     "mirror": "Horizontal spiegeln",
     "codec": "Codec",
     "floatingWindow": "Schwebendes Fenster",

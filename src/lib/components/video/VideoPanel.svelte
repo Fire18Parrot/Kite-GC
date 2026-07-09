@@ -183,7 +183,7 @@
     return () => el.cancelVideoFrameCallback?.(handle);
   });
 
-  const RESOLUTIONS: VideoResolution[] = ['auto', '720p', '1080p'];
+  const RESOLUTIONS: VideoResolution[] = ['auto', '480p', '720p', '1080p'];
   const CAMERA_FPS: CameraFps[] = ['auto', '30', '60'];
 
   // Native-capture cascade, derived from the probed modes (curated ∩ device). Codec is not a control
@@ -202,6 +202,17 @@
     const cur = s.mjpegUrl ? mjpegFps : measuredFps;
     const curStr = cur ? cur.toFixed(0) : '–';
     return s.frameRate ? `${curStr}/${Math.round(s.frameRate)}` : curStr;
+  });
+
+  // Diagnostic: which capture pipeline is actually live, so it no longer has to be guessed from the
+  // fps format. `mjpegUrl` set = the ffmpeg→MJPEG `<img>` multipart path (software-decoded, the
+  // fallback); otherwise a hardware-composited `<video>` MediaStream (getUserMedia or go2rtc/WebRTC).
+  const pipeline = $derived.by((): { method: string; hw: boolean } | null => {
+    const s = $videoState;
+    if (s.status !== 'live') return null;
+    if (s.mjpegUrl) return { method: s.kind === 'rtsp' ? 'go2rtc → MJPEG' : 'ffmpeg → MJPEG', hw: false };
+    if (s.kind === 'rtsp') return { method: `go2rtc → WebRTC (${s.rtspEngine ?? 'native'})`, hw: true };
+    return { method: 'getUserMedia', hw: true };
   });
 </script>
 
@@ -261,6 +272,13 @@
         {$videoState.width ?? '–'}×{$videoState.height ?? '–'}
         · {fpsText} fps
       </div>
+      {#if pipeline}
+        <div class="pipeline-line" class:sw={!pipeline.hw}>
+          <span class="pl-dot"></span>
+          <span class="pl-method">{pipeline.method}</span>
+          <span class="pl-badge">{pipeline.hw ? $t('video.pipeline.hw') : $t('video.pipeline.sw')}</span>
+        </div>
+      {/if}
     {/if}
 
     <label class="field">
@@ -497,6 +515,30 @@
     margin-top: -6px;
     letter-spacing: 0.02em;
   }
+  /* Diagnostic pipeline readout: dot + method + a HW/SW badge. Green = hardware-composited <video>
+     (getUserMedia / go2rtc-WebRTC); amber = the software ffmpeg→MJPEG <img> fallback. */
+  .pipeline-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: #cfe6f2;
+    letter-spacing: 0.02em;
+  }
+  .pl-dot { width: 7px; height: 7px; border-radius: 50%; background: #4fc47a; flex: 0 0 auto; }
+  .pipeline-line.sw .pl-dot { background: #e0a53c; }
+  .pl-method { font-variant-numeric: tabular-nums; }
+  .pl-badge {
+    margin-left: auto;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: #4fc47a;
+    background: rgba(79, 196, 122, 0.14);
+  }
+  .pipeline-line.sw .pl-badge { color: #e0a53c; background: rgba(224, 165, 60, 0.14); }
 
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field-row { display: flex; align-items: center; gap: 8px; }

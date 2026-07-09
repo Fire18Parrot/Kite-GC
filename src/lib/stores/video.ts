@@ -32,7 +32,7 @@ export interface VideoDevice {
 }
 
 export type VideoStatus = 'off' | 'starting' | 'live' | 'error';
-export type VideoResolution = 'auto' | '720p' | '1080p';
+export type VideoResolution = 'auto' | '480p' | '720p' | '1080p';
 /** getUserMedia framerate wish (the camera path can't enumerate modes, only hint a rate). */
 export type CameraFps = 'auto' | '30' | '60';
 /** Source kind: local camera (getUserMedia MediaStream), RTSP bridge (go2rtc), or native hardware
@@ -271,6 +271,7 @@ export function reportVideoSize(width: number, height: number): void {
 
 const RES_DIMS: Record<VideoResolution, MediaTrackConstraints> = {
   auto: {},
+  '480p': { width: { ideal: 640 }, height: { ideal: 480 } },
   '720p': { width: { ideal: 1280 }, height: { ideal: 720 } },
   '1080p': { width: { ideal: 1920 }, height: { ideal: 1080 } },
 };
@@ -405,8 +406,22 @@ export async function enumerateVideoDevices(): Promise<void> {
   }
   try {
     const all = await navigator.mediaDevices.enumerateDevices();
+    // WebKitGTK lists every V4L2 node as a separate videoinput, and a UVC / Windows-Hello camera
+    // exposes several (colour + IR + metadata). The non-colour nodes can't be opened as a normal
+    // stream → selecting one throws and the picker snaps back to "Default". Keep one entry per
+    // physical camera: dedup by groupId (else label), keeping the first node (the colour one,
+    // /dev/video0 before video1…).
+    const seen = new Set<string>();
     const devices = all
       .filter((d) => d.kind === 'videoinput')
+      .filter((d) => {
+        // Label first: WebKitGTK gives each V4L2 node of one camera the *same* label but often a
+        // *different* groupId, so groupId-dedup would keep the duplicates. deviceId is the last resort.
+        const key = d.label || d.groupId || d.deviceId;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
       .map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Camera ${i + 1}` }));
     patch({ devices });
     // Drop a stale selection that no longer exists.
