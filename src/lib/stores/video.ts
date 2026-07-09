@@ -876,6 +876,10 @@ export async function enterPiP(): Promise<void> {
  * saved one is gone). Call once, client-side.
  */
 export async function initVideo(): Promise<void> {
-  if (mediaDevicesAvailable()) await enumerateVideoDevices();
+  // Skip getUserMedia enumeration at startup on Linux: it drives WebKit's GStreamer capture stack
+  // (pipewire), which hangs ~35 s and freezes launch on boxes with an unreachable pipewire (the
+  // symptom the native/MJPEG path was meant to avoid). Only the `camera` source needs this list, and
+  // it's enumerated lazily when the panel shows the camera dropdown. Windows/macOS enumerate fast.
+  if (mediaDevicesAvailable() && !isLinux) await enumerateVideoDevices();
   if (boot.enabled) await startActive();
 }
