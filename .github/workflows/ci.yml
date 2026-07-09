@@ -67,6 +67,14 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # macOS bundles an ffmpeg sidecar (externalBin in tauri.macos.conf.json). Tauri's build script
+      # resolves that path during cargo check, so the sidecar must exist or the check aborts with
+      # "resource path binaries/ffmpeg-aarch64-apple-darwin doesn't exist". The release workflow already
+      # fetches it; the check job needs the same step. Other platforms have no sidecar, so skip them.
+      - name: Fetch bundled ffmpeg (macOS check needs the sidecar)
+        if: matrix.os == 'macos-latest'
+        run: bash scripts/fetch-ffmpeg-macos.sh
+
       - name: Run cargo check
         working-directory: src-tauri
         run: cargo check --verbose
