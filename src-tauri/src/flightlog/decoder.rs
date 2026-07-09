@@ -58,6 +58,16 @@ pub fn install_dir() -> PathBuf {
                 .join("bin");
         }
     }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("kite-gc")
+                .join("bin");
+        }
+    }
     PathBuf::from("bin")
 }
 
