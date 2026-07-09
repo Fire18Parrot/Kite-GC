@@ -1727,6 +1727,9 @@
       "oit": "Order-independent translucency (reloads)",
       "logDepth": "Logarithmic depth buffer",
       "hdr": "High dynamic range",
+      "secPaint": "WebView paint (2D)",
+      "noBlur": "Disable blur (backdrop-filter)",
+      "paintHint": "Dev diagnostic: strips ALL backdrop-filter blur (glassmorphism) app-wide to test the Linux/WebKitGTK idle full-page-repaint cost. Persists across reloads; turn off when done.",
       "hint": "Live-edits the running Cesium scene to find the bottleneck. Higher fog density / SSE factor coarsen and hide distant terrain; raising max SSE lowers terrain detail everywhere. Full-screen passes (OIT / HDR) run every frame regardless of scene content — prime suspects for the per-pixel cost. Not persisted — values reset on reload."
     },
     "rcRead": "Read FC config",
