@@ -43,15 +43,19 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 collected=()
 
-# Copy the first file matching <glob> under the unified name <type>.<ext>.
+# Copy the NEWEST file matching <glob> under the unified name <type>.<ext>.
+# "Newest" (not first) matters: Tauri never prunes its bundle dir, so stale artifacts from
+# earlier builds — often a *lower* version that sorts first alphabetically — pile up next to
+# the fresh one. A plain first-match glob would grab that stale file and rename it to the
+# current version, shipping an old build under a new name. Pick by mtime instead; the cleanup
+# after the collection block then removes the raw outputs so the pile-up can't recur.
 grab_file() { # <glob> <type> <ext>
-    for f in $1; do
-        [ -e "$f" ] || continue
-        dest="$(name "$2" "$3")"
-        cp -f "$f" "$OUT/$dest"
-        collected+=("$dest")
-        return 0
-    done
+    local newest dest
+    newest="$(ls -1dt $1 2>/dev/null | head -n1)"
+    [ -n "$newest" ] && [ -e "$newest" ] || return 0
+    dest="$(name "$2" "$3")"
+    cp -f "$newest" "$OUT/$dest"
+    collected+=("$dest")
 }
 
 # Zip a bare binary + a generated empty `.portable` marker under the unified portable name.
@@ -72,13 +76,13 @@ if [ "$OS" = "macOS" ]; then
     BUNDLE="$TARGET/universal-apple-darwin/release/bundle"
     grab_file "$BUNDLE/dmg/*.dmg" installer dmg
     # .app is a bundle (directory) → zip with ditto so the bundle structure/symlinks stay intact.
-    for app in "$BUNDLE"/macos/*.app; do
-        [ -e "$app" ] || continue
+    # Pick the NEWEST .app (same stale-pile-up reasoning as grab_file above).
+    app="$(ls -1dt "$BUNDLE"/macos/*.app 2>/dev/null | head -n1)"
+    if [ -n "$app" ] && [ -e "$app" ]; then
         dest="$(name standalone zip)"
         (cd "$(dirname "$app")" && ditto -c -k --keepParent "$(basename "$app")" "$OUT/$dest")
         collected+=("$dest")
-        break
-    done
+    fi
 else
     REL="$TARGET/release"
     BUNDLE="$REL/bundle"
@@ -86,6 +90,19 @@ else
     grab_file "$BUNDLE/rpm/*.rpm" installer rpm
     grab_file "$BUNDLE/appimage/*.AppImage" standalone AppImage
     zip_portable "$REL/kite-gc" kite-gc
+fi
+
+# Now that the fresh outputs live in release/ under our unified names, delete the raw bundle
+# outputs we just consumed. Tauri never prunes this dir itself, so leaving them is exactly what
+# lets stale, wrongly-versioned artifacts accumulate and get mis-collected next time. Removing
+# them (both the packages and Tauri's staging dirs beside them) keeps the source clean. The bare
+# CLI binary at $REL/kite-gc is a cargo output, not a bundle artifact — it stays.
+if [ ${#collected[@]} -gt 0 ]; then
+    if [ "$OS" = "macOS" ]; then
+        rm -rf "$BUNDLE/dmg" "$BUNDLE/macos"
+    else
+        rm -rf "$BUNDLE/deb" "$BUNDLE/rpm" "$BUNDLE/appimage"
+    fi
 fi
 
 echo ""

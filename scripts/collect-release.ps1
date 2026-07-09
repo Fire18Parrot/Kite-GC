@@ -28,8 +28,12 @@ New-Item -ItemType Directory -Path $out | Out-Null
 
 $collected = @()
 
-# NSIS installer.
-Get-ChildItem (Join-Path $bundle 'nsis\*-setup.exe') -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object {
+# NSIS installer. Pick the NEWEST match, not the first: Tauri never prunes its bundle dir, so
+# stale installers from earlier builds pile up beside the fresh one and a first-match (which is
+# alphabetical, so a lower version wins) would ship an old build under the current name. The
+# cleanup at the end then removes the raw outputs so the pile-up can't recur.
+Get-ChildItem (Join-Path $bundle 'nsis\*-setup.exe') -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1 | ForEach-Object {
     $dest = Get-Name 'installer' 'exe'
     Copy-Item $_.FullName (Join-Path $out $dest) -Force
     $script:collected += $dest
@@ -46,6 +50,14 @@ if (Test-Path $exe) {
     Compress-Archive -Path (Join-Path $tmp 'kite-gc.exe'), (Join-Path $tmp '.portable') -DestinationPath (Join-Path $out $dest) -Force
     Remove-Item $tmp -Recurse -Force
     $script:collected += $dest
+}
+
+# Delete the raw bundle output we just consumed. Tauri never prunes it, and leaving it is exactly
+# what lets stale, wrongly-versioned installers accumulate and get mis-collected next time. The
+# portable .exe comes straight from $rel\kite-gc.exe (a cargo output, overwritten each build), so
+# there's nothing to prune there.
+if ($collected.Count -gt 0) {
+    Remove-Item (Join-Path $bundle 'nsis') -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host ''
