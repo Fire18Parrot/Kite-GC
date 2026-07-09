@@ -52,27 +52,5 @@ bash "$(dirname "$0")/fetch-ffmpeg-macos.sh"
 echo "[3/4] Building universal application with Tauri..."
 npm run tauri build -- --target universal-apple-darwin --bundles app dmg
 
-echo "[4/4] Collecting outputs into release/ ..."
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TARGET="${CARGO_TARGET_DIR:-$ROOT/src-tauri/target}"
-BUNDLE="$TARGET/universal-apple-darwin/release/bundle"
-OUT="$ROOT/release"
-rm -rf "$OUT"
-mkdir -p "$OUT"
-
-collected=()
-for f in "$BUNDLE"/dmg/*.dmg "$BUNDLE"/macos/*.app; do
-    [ -e "$f" ] || continue
-    dest="$(basename "$f")"
-    # .app is a bundle (directory) → copy recursively; .dmg is a file.
-    cp -Rf "$f" "$OUT/$dest"
-    collected+=("$dest")
-done
-
-echo ""
-if [ ${#collected[@]} -eq 0 ]; then
-    echo "[build-macos] No outputs found under $BUNDLE — did the build succeed?"
-else
-    echo "[build-macos] Collected into $OUT :"
-    for c in "${collected[@]}"; do echo "  - $c"; done
-fi
+echo "[4/4] Collecting outputs into release/ (unified naming) ..."
+bash "$(dirname "$0")/collect-release.sh"

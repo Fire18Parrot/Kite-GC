@@ -37,14 +37,14 @@ jobs:
           workspaces: src-tauri
       - name: Build Tauri bundle
         run: npm run tauri build
+      - name: Collect + rename artifacts
+        run: powershell -ExecutionPolicy Bypass -File scripts/collect-release.ps1
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v5
         with:
           name: kite-gc-windows
           if-no-files-found: error
-          path: |
-            src-tauri/target/release/kite-gc.exe
-            src-tauri/target/release/bundle/nsis/*-setup.exe
+          path: release/*
 
   # Universal macOS build (arm64 + x86_64 in one .app/.dmg) so a single download runs on both Apple
   # Silicon and Intel Macs. Built UNSIGNED on purpose: no Apple Developer credentials are placed on CI
@@ -71,14 +71,14 @@ jobs:
         run: bash scripts/fetch-ffmpeg-macos.sh
       - name: Build Tauri bundle (universal)
         run: npm run tauri build -- --target universal-apple-darwin --bundles app dmg
+      - name: Collect + rename artifacts
+        run: bash scripts/collect-release.sh
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v5
         with:
           name: kite-gc-macos-universal
           if-no-files-found: error
-          path: |
-            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+          path: release/*
 
   linux:
     name: Build (Linux · ubuntu-22.04)
@@ -102,7 +102,8 @@ jobs:
             patchelf \
             file \
             libfuse2 \
-            xdg-utils
+            xdg-utils \
+            zip
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
@@ -114,16 +115,14 @@ jobs:
           workspaces: src-tauri
       - name: Build Tauri bundle
         run: npm run tauri build
+      - name: Collect + rename artifacts
+        run: bash scripts/collect-release.sh
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v5
         with:
           name: kite-gc-linux
           if-no-files-found: error
-          path: |
-            src-tauri/target/release/kite-gc
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/rpm/*.rpm
-            src-tauri/target/release/bundle/appimage/*.AppImage
+          path: release/*
 
   # Native aarch64 build on GitHub's ARM64 Linux runner (free for public repos) — no cross-compile, so
   # the Pi 5 (and other arm64 Linux) gets a ready binary/.deb/.AppImage without a local build env. Same
@@ -150,7 +149,8 @@ jobs:
             patchelf \
             file \
             libfuse2 \
-            xdg-utils
+            xdg-utils \
+            zip
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
@@ -162,13 +162,11 @@ jobs:
           workspaces: src-tauri
       - name: Build Tauri bundle
         run: npm run tauri build
+      - name: Collect + rename artifacts
+        run: bash scripts/collect-release.sh
       - name: Upload Linux ARM64 artifacts
         uses: actions/upload-artifact@v5
         with:
           name: kite-gc-linux-arm64
           if-no-files-found: error
-          path: |
-            src-tauri/target/release/kite-gc
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/rpm/*.rpm
-            src-tauri/target/release/bundle/appimage/*.AppImage
+          path: release/*
