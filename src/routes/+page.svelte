@@ -55,7 +55,6 @@
   import SettingsPanel from "$lib/components/SettingsPanel.svelte";
   import { ensureUserLocation, requestUserLocation, userGeoLocation } from "$lib/helpers/userLocation";
   import { gcsLocation } from "$lib/stores/gcsLocation";
-  import { disableBlur } from "$lib/stores/perfPaint";
   import { fetchAero } from "$lib/stores/airspace";
   import { PlaybackController } from '$lib/controllers/playbackController';
   import { refreshSerialPorts, connectFC, disconnectFC, startBleScan, stopBleScan, startBleDeviceListener, stopBleDeviceListener, clearBleDevices } from '$lib/controllers/connectionController';
@@ -347,14 +346,6 @@
   // so the chunk stays in the release bundle (loaded lazily only when debug mode is actually on).
   let debugMode = $state(false);
   const DEV_MODE = $derived(import.meta.env.DEV || debugMode);
-
-  // Dev paint diagnostic (Debug Panel → 3D Perf tab): reflect the blur toggle onto <html> so a
-  // global rule can strip all backdrop-filter blur — localises the Linux/WebKitGTK idle-paint cost.
-  $effect(() => {
-    const root = document.documentElement;
-    if ($disableBlur) root.setAttribute('data-perf-noblur', '');
-    else root.removeAttribute('data-perf-noblur');
-  });
   let debugOpen = $state(false);
   let DebugPanelCmp: any = $state(null);
   $effect(() => {
@@ -2822,13 +2813,6 @@
 </div><!-- .ui-root -->
 
 <style>
-  /* Dev paint diagnostic (Debug Panel → 3D Perf tab): strip ALL backdrop-filter blur app-wide to
-     test the Linux/WebKitGTK idle full-page-repaint cost. Default off (attribute absent) → no effect. */
-  :global(html[data-perf-noblur] *) {
-    backdrop-filter: none !important;
-    -webkit-backdrop-filter: none !important;
-  }
-
   /* ============================================================
      Kite Ground Control Theme — Floating Panel Layout
      Color palette derived from INAV Configurator

@@ -1727,9 +1727,6 @@
       "oit": "Order-Independent Translucency (lädt neu)",
       "logDepth": "Logarithmischer Tiefenpuffer",
       "hdr": "High Dynamic Range",
-      "secPaint": "WebView-Paint (2D)",
-      "noBlur": "Blur deaktivieren (backdrop-filter)",
-      "paintHint": "Dev-Diagnose: entfernt app-weit ALLE backdrop-filter-Blur (Glassmorphism), um die Linux/WebKitGTK-Idle-Full-Page-Repaint-Last zu testen. Bleibt über Neuladen erhalten; danach wieder ausschalten.",
       "hint": "Bearbeitet die laufende Cesium-Szene live, um den Flaschenhals zu finden. Höhere Nebeldichte / SSE-Faktor vergröbern und verstecken fernes Terrain; ein höherer max. SSE senkt die Terrain-Detailstufe überall. Fullscreen-Pässe (OIT / HDR) laufen jeden Frame unabhängig vom Szeneninhalt — Hauptverdächtige für die Per-Pixel-Kosten. Nicht persistent — Werte werden beim Neuladen zurückgesetzt."
     },
     "rcRead": "FC-Config lesen",

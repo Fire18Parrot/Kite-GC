@@ -18,7 +18,6 @@
   import { fcChannels } from "$lib/stores/rcMirror";
   import { boxName } from "$lib/helpers/inavModes";
   import { getPerf3dViewer, perf3dFps, perf3dForceContinuous, perf3dAttached } from "$lib/stores/perf3d";
-  import { disableBlur } from "$lib/stores/perfPaint";
 
   let { onclose }: { onclose: () => void } = $props();
 
@@ -808,11 +807,6 @@
         <label class="perf-check"><input type="checkbox" bind:checked={pFpsOverlay} onchange={applyPerf} /> {$t('debug.perf.fpsOverlay')}</label>
         <button class="perf-refresh" onclick={loadPerf}>{$t('debug.perf.refresh')}</button>
       </div>
-
-      <!-- 2D WebView paint diagnostic — always available (independent of the 3D view). -->
-      <div class="perf-section">{$t('debug.perf.secPaint')}</div>
-      <label class="perf-check"><input type="checkbox" bind:checked={$disableBlur} /> {$t('debug.perf.noBlur')}</label>
-      <div class="perf-hint">{$t('debug.perf.paintHint')}</div>
 
       {#if !perfReady}
         <div class="perf-empty">{$t('debug.perf.inactive')}</div>
