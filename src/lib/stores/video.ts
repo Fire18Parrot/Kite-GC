@@ -19,6 +19,7 @@
 
 import { writable, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
+import { isLinux } from '$lib/platform';
 import {
   type NativeDevice,
   type CaptureMode,
@@ -280,9 +281,15 @@ const RES_DIMS: Record<VideoResolution, MediaTrackConstraints> = {
 // a high ideal rate (60, the FPV standard) nudges the browser toward the camera's MJPEG mode. The
 // `native` source is the real fix when the browser still won't deliver. 'auto' keeps the 60 nudge; an
 // explicit 30 asks for the lower rate.
+//
+// On Linux/WebKitGTK the browser SOFTWARE-decodes every frame and composites it through a Wayland
+// subsurface, so an uncapped 'auto' at 60 fps saturates the WebKit process and freezes the whole app
+// on weak hardware. There we bound decode load: 'auto' caps to 720p (never uncapped) and the fps ideal
+// never exceeds 30. (The `native` source additionally routes through the ffmpeg/MJPEG path on Linux.)
 function cameraConstraints(res: VideoResolution, fps: CameraFps): MediaTrackConstraints {
-  const ideal = fps === '30' ? 30 : 60;
-  return { ...RES_DIMS[res], frameRate: { ideal } };
+  const dims = res === 'auto' && isLinux ? RES_DIMS['720p'] : RES_DIMS[res];
+  const ideal = fps === '30' ? 30 : isLinux ? 30 : 60;
+  return { ...dims, frameRate: { ideal } };
 }
 
 function mediaDevicesAvailable(): boolean {
@@ -626,8 +633,11 @@ export async function startRtsp(): Promise<void> {
 
 /** Open a native capture device with device-verified resolution/framerate. Primary path: getUserMedia
  *  with `exact` constraints → a hardware-composited `<video>` MediaStream (no map-compositor
- *  contention, no transcoding — the same clean path as the plain camera). Fallback: the ffmpeg → MJPEG
- *  `<img>` server, only for devices getUserMedia can't expose (e.g. some Linux HDMI dongles). */
+ *  contention, no transcoding — the same clean path as the plain camera). On Linux/WebKitGTK this is
+ *  skipped in favour of the ffmpeg → MJPEG `<img>` server: the getUserMedia/GStreamer capture stack
+ *  (pipewire/libcamera) hangs enumeration and software-decodes into a full-app freeze on weak hardware.
+ *  The MJPEG server is also the fallback elsewhere for devices getUserMedia can't expose (e.g. some
+ *  Linux HDMI dongles). */
 export async function startNative(): Promise<void> {
   stopTracks();
   const st = get(videoState);
@@ -640,8 +650,13 @@ export async function startNative(): Promise<void> {
   savePrefs();
   const sel = st.nativeSel;
 
-  // Primary: hardware <video> via getUserMedia.
-  const guId = await findGetUserMediaId(id);
+  // Primary: hardware <video> via getUserMedia — EXCEPT on Linux/WebKitGTK, where that path drives
+  // WebKit's GStreamer capture stack (pipewire/libcamera): it can hang enumeration ~35 s and
+  // software-decodes every frame into a full-app freeze on weak hardware. There we go straight to the
+  // ffmpeg→MJPEG server below (deterministic fps/res caps, no pipewire). getUserMedia stays primary on
+  // Chromium/WebView2 (Windows) and WKWebView (macOS). Skipping it here also avoids the label-probe
+  // (an extra getUserMedia) inside findGetUserMediaId, which a stalled pipewire could hang on.
+  const guId = isLinux ? null : await findGetUserMediaId(id);
   if (guId) {
     try {
       const stream = await getNativeUserMedia(guId, sel);
