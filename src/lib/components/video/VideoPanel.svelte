@@ -44,7 +44,6 @@
   import PanelShell from '$lib/components/panel/PanelShell.svelte';
   import Button from '$lib/components/panel/Button.svelte';
   import Toggle from '$lib/components/panel/Toggle.svelte';
-  import { isLinux } from '$lib/platform';
 
   let videoEl = $state<HTMLVideoElement | null>(null);
 
@@ -53,12 +52,9 @@
     bindVideoEl(videoEl, $videoStream);
   });
 
-  // Populate the device lists when the panel opens. The getUserMedia list is only consumed by the
-  // `camera` source; on Linux, enumerating it drives WebKit's GStreamer/pipewire stack, which can hang
-  // ~35 s on an unreachable pipewire and freeze the app — so there we enumerate it only when the camera
-  // source is actually selected. The native list comes from the Rust V4L2 backend (no pipewire).
+  // Populate the device lists when the panel opens.
   $effect(() => {
-    if (!isLinux || $videoState.kind === 'camera') void enumerateVideoDevices();
+    void enumerateVideoDevices();
     void enumerateNativeDevices();
   });
 
