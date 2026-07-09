@@ -38,6 +38,7 @@
     relayOpen = false,
     onToggleRelay,
     onOpenRc,
+    onRescanBle,
   }: {
     appVersion: string;
     telem: TelemetryData;
@@ -59,6 +60,8 @@
     onToggleRelay?: () => void;
     /** Open the RC control panel (from the "RC control active" indicator). */
     onOpenRc?: () => void;
+    /** Trigger a fresh bounded BLE scan window — called when the device dropdown is opened. */
+    onRescanBle?: () => void;
   } = $props();
 
   // ── Bluetooth SPP port custom names ────────────────────────────────
@@ -243,7 +246,8 @@
             max="65535"
           />
         {:else if selectedTransport === 'ble'}
-          <select class="tb-select ble-select" bind:value={selectedBleDevice}>
+          <select class="tb-select ble-select" bind:value={selectedBleDevice}
+            onmousedown={() => onRescanBle?.()} onfocus={() => onRescanBle?.()}>
             {#if bleDeviceList.length === 0}
               <option value="">{isBleScanning ? $t('connection.bleScanning') : $t('connection.noBleDevices')}</option>
             {:else}

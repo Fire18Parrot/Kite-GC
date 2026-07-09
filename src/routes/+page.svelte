@@ -1759,14 +1759,26 @@
     return () => clearInterval(id);
   });
 
-  // BLE: a continuous backend scan streams discovered/updated devices via the `ble-device` event
-  // (listener set up in initPage), so the list populates in real time. Start it on entering BLE,
-  // stop it on leaving / connecting.
+  // BLE discovery is a firehose: the backend scan puts the adapter into CONTINUOUS discovery, and
+  // BlueZ emits a D-Bus signal per advertisement (hundreds/s in a busy RF area) for as long as it
+  // runs — pegging dbus-daemon + bluetoothd, not Kite itself. So we never hold it open: each scan is
+  // a short bounded WINDOW. One fires on entering BLE (list ready), and one each time the device
+  // dropdown is opened (fresh RSSI) via onRescanBle. Devices stream in through the `ble-device` event
+  // (listener set up in initPage) during the window.
+  let bleScanTimer: ReturnType<typeof setTimeout> | undefined;
+  const BLE_SCAN_WINDOW_MS = 6000;
+  function bleScanWindow() {
+    if (selectedTransport !== 'ble' || connStatus === 'connected' || connStatus === 'connecting') return;
+    clearTimeout(bleScanTimer);
+    isBleScanning = true;
+    void startBleScan(); // backend restarts any running session
+    bleScanTimer = setTimeout(() => { isBleScanning = false; void stopBleScan(); }, BLE_SCAN_WINDOW_MS);
+  }
   $effect(() => {
     if (selectedTransport !== 'ble' || connStatus === 'connected' || connStatus === 'connecting') return;
-    isBleScanning = true;
-    untrack(() => { clearBleDevices(); void startBleScan(); });
+    untrack(() => { clearBleDevices(); bleScanWindow(); });
     return () => {
+      clearTimeout(bleScanTimer);
       isBleScanning = false;
       void stopBleScan();
     };
@@ -2538,6 +2550,7 @@
     relayOpen={relayPanelOpen}
     onToggleRelay={() => (relayPanelOpen = !relayPanelOpen)}
     onOpenRc={() => selectTab('rc-control')}
+    onRescanBle={bleScanWindow}
   />
     <RelayPanel open={relayPanelOpen} />
   </div>
