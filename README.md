@@ -16,7 +16,12 @@
 </p>
 
 ---
+## Development State: 
 
+Kite is currently in **feature-freeze** state for the 1.0 release. 
+Only PRs for **bugfixes will be accepted** and merged (towards `master` branch) But new **features or functional changes will not be merged** until after the final 1.0 release is out. 
+
+--- 
 **Kite Ground Control (Kite GC)** is a modern, cross-platform ground control station for **INAV**,
 **ArduPilot** and **PX4** aircraft — planes, multirotors, VTOL, helicopters, rovers and boats. It
 combines everything you expect from a GCS with a fast, intuitive interface and a few things you won't
