@@ -9,8 +9,9 @@
 //! (which `blackbox::find_decoder` also searches).
 //!
 //! Windows releases ship a `.zip` containing `bin/blackbox_decode.exe`, which we unpack with the
-//! `zip` crate. macOS/Linux/FreeBSD releases ship `.tar.zst`, which we don't unpack here — those
-//! users install manually (the error points them at the releases page).
+//! `zip` crate. macOS/Linux releases ship `.tar.zst`, unpacked via the `zstd` + `tar` crates (the
+//! binary is made executable after extraction). Only platforms without a matching release asset
+//! (e.g. FreeBSD) fall back to the manual-install error pointing at the releases page.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

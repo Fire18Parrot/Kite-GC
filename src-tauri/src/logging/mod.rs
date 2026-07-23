@@ -196,6 +196,17 @@ fn write_session_header(level: LevelFilter, portable: bool) {
         std::env::consts::ARCH,
         portable,
     ));
+    // Running format + resolved paths — one glance tells a bug report's install story: where the
+    // binary actually runs from (.dmg-installed app vs a stray .app, portable dir, translocation)
+    // and where on-demand helpers (blackbox_decode) land. A relative helper dir here is an
+    // immediate red flag (the macOS Beta 3 "cannot write bin/blackbox_decode" case, issue #20).
+    if let Ok(exe) = std::env::current_exe() {
+        write_raw(&format!("Exe: {}", exe.display()));
+    }
+    write_raw(&format!(
+        "Helper dir: {}",
+        crate::flightlog::decoder::install_dir().display()
+    ));
     write_raw(&format!("Log level: {level}"));
     write_raw(&sep);
 }
