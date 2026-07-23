@@ -41,6 +41,16 @@ export type CameraFps = 'auto' | '30' | '60';
 export type VideoKind = 'camera' | 'rtsp' | 'native';
 /** Which go2rtc reader served the live RTSP feed: native client or the ffmpeg fallback. */
 export type RtspEngine = 'native' | 'ffmpeg' | null;
+/** RTSP transport for a connection. 'udp' → ffmpeg reader (reads UDP-only servers like the UAV-Link
+ *  Pi); 'tcp' → go2rtc's native RTP-over-TCP client; 'auto' → native first, then the ffmpeg fallback. */
+export type RtspTransport = 'udp' | 'tcp' | 'auto';
+/** A saved, named RTSP connection the user can recall from the connection list (see VideoPanel). */
+export interface RtspConnection {
+  id: string;
+  name: string;
+  url: string;
+  transport: RtspTransport;
+}
 /** Where the single map instance currently lives (the inverse of which surfaces show video). */
 export type MapLocation = 'main' | 'floating' | 'widget';
 
@@ -67,10 +77,18 @@ export interface VideoState {
   /** Chosen native capture config (format/resolution/framerate). */
   nativeSel: NativeSelection;
   // ── RTSP source ──────────────────────────────────────────────────
-  /** RTSP URL (e.g. rtsp://192.168.1.10:554/live). */
+  /** RTSP URL (e.g. rtsp://192.168.1.10:554/live) — the active/direct-connect URL. */
   rtspUrl: string;
+  /** Transport for the active RTSP connection (udp/tcp/auto). */
+  rtspTransport: RtspTransport;
+  /** Saved, named RTSP connections the user can recall (explicit save — never auto-added). */
+  rtspConnections: RtspConnection[];
   /** Active RTSP reader once live (native go2rtc client vs ffmpeg fallback); runtime-only. */
   rtspEngine: RtspEngine;
+  /** Runtime-only: true while the infinite RTSP auto-reconnect loop is running (link dropped/stalled). */
+  reconnecting: boolean;
+  /** Runtime-only: current reconnect attempt number, shown in the on-video overlay. */
+  reconnectAttempt: number;
   /** go2rtc MJPEG HTTP URL for systems where RTCPeerConnection is unavailable. */
   mjpegUrl: string | null;
   /** Mirror horizontally (front-facing cams) — applied by the display sinks. */
@@ -117,6 +135,8 @@ interface VideoPrefs {
   resolution: VideoResolution;
   cameraFps: CameraFps;
   rtspUrl: string;
+  rtspTransport: RtspTransport;
+  rtspConnections: RtspConnection[];
   nativeDevice: string | null;
   nativeWidth: number;
   nativeHeight: number;
@@ -136,6 +156,8 @@ const PREF_DEFAULTS: VideoPrefs = {
   resolution: 'auto',
   cameraFps: 'auto',
   rtspUrl: '',
+  rtspTransport: 'auto',
+  rtspConnections: [],
   nativeDevice: null,
   nativeWidth: 1280,
   nativeHeight: 720,
@@ -163,6 +185,8 @@ function loadPrefs(): VideoPrefs {
         resolution: p.resolution ?? 'auto',
         cameraFps: p.cameraFps ?? 'auto',
         rtspUrl: p.rtspUrl ?? '',
+        rtspTransport: p.rtspTransport ?? 'auto',
+        rtspConnections: Array.isArray(p.rtspConnections) ? p.rtspConnections : [],
         nativeDevice: p.nativeDevice ?? p.v4l2Device ?? null,
         nativeWidth: p.nativeWidth ?? 1280,
         nativeHeight: p.nativeHeight ?? 720,
@@ -188,6 +212,8 @@ function savePrefs(): void {
         resolution: s.resolution,
         cameraFps: s.cameraFps,
         rtspUrl: s.rtspUrl,
+        rtspTransport: s.rtspTransport,
+        rtspConnections: s.rtspConnections,
         nativeDevice: s.nativeDevice,
         nativeWidth: s.nativeSel.width,
         nativeHeight: s.nativeSel.height,
@@ -224,7 +250,11 @@ const INITIAL: VideoState = {
     fps: boot.nativeFps,
   },
   rtspUrl: boot.rtspUrl,
+  rtspTransport: boot.rtspTransport,
+  rtspConnections: boot.rtspConnections,
   rtspEngine: null,
+  reconnecting: false,
+  reconnectAttempt: 0,
   mjpegUrl: null,
   mirror: boot.mirror,
   aspect: 16 / 9,
@@ -573,9 +603,8 @@ async function negotiateWebrtc(url: string, useFfmpeg: boolean): Promise<void> {
     patch({ status: 'live', error: null });
   };
   pc.onconnectionstatechange = () => {
-    if (rtcConn === pc && (pc.connectionState === 'failed' || pc.connectionState === 'closed')) {
-      patch({ status: 'error', error: `WebRTC ${pc.connectionState}` });
-    }
+    // A genuine drop (failed) enters the infinite reconnect loop; 'closed' is our own teardown.
+    if (rtcConn === pc && pc.connectionState === 'failed') scheduleRtspReconnect();
   };
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -589,45 +618,153 @@ async function negotiateWebrtc(url: string, useFfmpeg: boolean): Promise<void> {
   patch({ rtspEngine: useFfmpeg ? 'ffmpeg' : 'native' });
 }
 
-/** Open (or re-open) the RTSP feed via go2rtc. Uses WebRTC when available,
- *  falls back to MJPEG over HTTP when RTCPeerConnection is missing. */
-export async function startRtsp(): Promise<void> {
+// ── RTSP auto-reconnect (infinite until frames return or the user stops) ──────────────────────────
+// The UAV-Link Pi is UDP-only with a "session lottery" (its FPS-watchdog EOSes bad sessions), and a
+// flying aircraft can drop into a radio hole. So the client reconnects INDEFINITELY and visibly until
+// frames flow again — only an explicit stop ends it. Trigger: a frame timeout (no new frames/bytes on
+// the WebRTC inbound track for RTSP_STALL_MS). UDP stays (latency over resends, per the UAV-Link design).
+// Two-phase stall detection (LTE-tested against the UAV-Link Pi):
+// - CONNECT phase (no frame seen yet): a fresh session that delivers nothing is a losing ticket in
+//   the server's session lottery → re-roll fast (also beats the Pi watchdog's ~10 s kill window).
+// - LIVE phase (frames were flowing): brief UDP gaps (LTE fluctuation) recover in-stream on their
+//   own — only a sustained silence means the session really died (watchdog EOS / radio hole).
+const RTSP_STALL_CONNECT_MS = 4000;
+const RTSP_STALL_LIVE_MS = 10_000;
+const RTSP_RECONNECT_BACKOFF_MS = 1500;
+let rtspMonitor: ReturnType<typeof setInterval> | undefined;
+let rtspReconnectTimer: ReturnType<typeof setTimeout> | undefined;
+
+function clearRtspTimers(): void {
+  if (rtspMonitor) { clearInterval(rtspMonitor); rtspMonitor = undefined; }
+  if (rtspReconnectTimer) { clearTimeout(rtspReconnectTimer); rtspReconnectTimer = undefined; }
+}
+
+/** Watch the inbound WebRTC stats; if frames/bytes stop advancing the link has stalled → reconnect.
+ *  Two-phase: 4 s until the FIRST frames arrive (dead session → re-roll fast), 10 s once the stream
+ *  was delivering (tolerate transient UDP gaps before a full reconnect). */
+function startRtspStallMonitor(pc: RTCPeerConnection): void {
+  if (rtspMonitor) clearInterval(rtspMonitor);
+  let last = -1;
+  let sawFrames = false;
+  let lastChange = performance.now();
+  rtspMonitor = setInterval(() => {
+    if (rtcConn !== pc) { if (rtspMonitor) { clearInterval(rtspMonitor); rtspMonitor = undefined; } return; }
+    void pc.getStats().then((stats) => {
+      if (rtcConn !== pc) return;
+      let progress = 0;
+      stats.forEach((report) => {
+        if (report.type === 'inbound-rtp') {
+          const rr = report as RTCInboundRtpStreamStats;
+          if (rr.kind === 'video') progress = rr.framesReceived ?? rr.bytesReceived ?? 0;
+        }
+      });
+      const now = performance.now();
+      if (progress !== last) {
+        if (last >= 0 && progress > last) sawFrames = true; // real advance, not the initial read
+        last = progress;
+        lastChange = now;
+      } else if (now - lastChange > (sawFrames ? RTSP_STALL_LIVE_MS : RTSP_STALL_CONNECT_MS)) {
+        console.warn(`[video] RTSP stalled (${sawFrames ? 'live feed silent' : 'no first frame'}) — reconnecting`);
+        scheduleRtspReconnect();
+      }
+    }).catch(() => {});
+  }, 1000);
+}
+
+/** Enter/continue the infinite reconnect loop: mark the visible reconnecting state and re-attempt
+ *  after a short backoff. Guarded so an explicit stop (kind changed / disabled) ends it. */
+function scheduleRtspReconnect(): void {
+  const st = get(videoState);
+  if (st.kind !== 'rtsp' || !st.enabled) return; // user stopped → do not reconnect
+  clearRtspTimers();
+  closeRtc();
+  videoStream.set(null);
+  patch({
+    reconnecting: true,
+    reconnectAttempt: st.reconnectAttempt + 1,
+    status: 'starting',
+    rtspEngine: null,
+    mjpegUrl: null,
+  });
+  rtspReconnectTimer = setTimeout(() => { void startRtsp({ reconnect: true }); }, RTSP_RECONNECT_BACKOFF_MS);
+}
+
+/** Negotiate the RTSP source honouring the connection's transport: udp → ffmpeg reader (reads
+ *  UDP-only servers like the UAV-Link Pi); tcp → native go2rtc client; auto → native, then ffmpeg. */
+async function negotiateRtsp(url: string, transport: RtspTransport): Promise<void> {
+  if (transport === 'udp') {
+    await negotiateWebrtc(url, true);
+  } else if (transport === 'tcp') {
+    await negotiateWebrtc(url, false);
+  } else {
+    try {
+      await negotiateWebrtc(url, false); // native go2rtc RTSP client
+    } catch (nativeErr) {
+      console.warn('[video] native go2rtc RTSP failed, retrying via ffmpeg', nativeErr);
+      closeRtc();
+      if (get(videoState).kind !== 'rtsp' || !get(videoState).enabled) return; // stopped meanwhile
+      await negotiateWebrtc(url, true); // ffmpeg reader fallback
+    }
+  }
+}
+
+/** Open (or re-open) the RTSP feed via go2rtc, honouring the active transport. Once live, a stall
+ *  monitor watches for frame timeouts; any failure/drop enters the infinite reconnect loop (until
+ *  frames return or the user stops). `reconnect` distinguishes a loop retry from a fresh start. */
+export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
+  const reconnect = opts?.reconnect ?? false;
+  clearRtspTimers();
   stopTracks(); // release the camera / previous peer connection
   const st = get(videoState);
   const url = st.rtspUrl.trim();
+  const transport = st.rtspTransport;
   if (!url) {
-    patch({ kind: 'rtsp', enabled: true, status: 'error', error: 'No RTSP URL' });
+    patch({ kind: 'rtsp', enabled: true, status: 'error', error: 'No RTSP URL', reconnecting: false, reconnectAttempt: 0 });
     return;
   }
-  patch({ kind: 'rtsp', enabled: true, status: 'starting', error: null, rtspEngine: null, mjpegUrl: null });
-  savePrefs();
+  patch({
+    kind: 'rtsp',
+    enabled: true,
+    status: 'starting',
+    error: null,
+    rtspEngine: null,
+    mjpegUrl: null,
+    ...(reconnect ? {} : { reconnecting: false, reconnectAttempt: 0 }),
+  });
+  if (!reconnect) savePrefs();
 
-  // MJPEG fallback: register the source (go2rtc handles RTSP natively) and use its HTTP endpoint.
+  // MJPEG fallback for webviews without RTCPeerConnection (rare in Tauri). Reader choice: keep the
+  // native go2rtc client for auto/tcp (the pre-connection-list behaviour — works without ffmpeg);
+  // only an explicit UDP selection routes through the ffmpeg reader (needs ffmpeg, like the normal
+  // UDP path).
   if (!isWebrtcAvailable()) {
     try {
-      // Start the stream with go2rtc's native client (no WebRTC needed)
-      await invoke('video_webrtc_start', { url, useFfmpeg: false });
+      await invoke('video_webrtc_start', { url, useFfmpeg: transport === 'udp' });
       const mjpegUrl = await buildMjpegUrl();
-      patch({ status: 'live', mjpegUrl, error: null, rtspEngine: 'native' });
+      patch({ status: 'live', mjpegUrl, error: null, rtspEngine: 'native', reconnecting: false, reconnectAttempt: 0 });
     } catch (e) {
-      closeRtc();
-      patch({ status: 'error', error: e instanceof Error ? e.message : String(e) });
+      console.warn('[video] RTSP (mjpeg) failed — reconnecting', e);
+      scheduleRtspReconnect();
     }
     return;
   }
 
   try {
-    await negotiateWebrtc(url, false); // native go2rtc RTSP client
-  } catch (nativeErr) {
-    console.warn('[video] native go2rtc RTSP failed, retrying via ffmpeg', nativeErr);
-    closeRtc();
-    if (get(videoState).status === 'off') return; // stopped meanwhile
-    try {
-      await negotiateWebrtc(url, true); // ffmpeg reader fallback
-    } catch (ffmpegErr) {
-      closeRtc();
-      patch({ status: 'error', error: ffmpegErr instanceof Error ? ffmpegErr.message : String(ffmpegErr) });
-    }
+    // Hard cap on one attempt: the backend invokes are bounded (10/15 s reqwest timeouts), but if
+    // any path ever hangs anyway, the loop must keep cycling instead of freezing mid-"Reconnecting…"
+    // (a wedged RTSP server once parked go2rtc's answer indefinitely — observed with the UAV-Link Pi).
+    await Promise.race([
+      negotiateRtsp(url, transport),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('RTSP negotiation timeout')), 20_000),
+      ),
+    ]);
+    if (get(videoState).kind !== 'rtsp' || !get(videoState).enabled) return; // stopped during negotiation
+    patch({ reconnecting: false, reconnectAttempt: 0 });
+    if (rtcConn) startRtspStallMonitor(rtcConn);
+  } catch (err) {
+    console.warn('[video] RTSP connect failed — reconnecting', err);
+    scheduleRtspReconnect();
   }
 }
 
@@ -707,12 +844,13 @@ export function startActive(): Promise<void> {
 /** Stop the source and release the camera / go2rtc engine. */
 export function stopVideo(): void {
   const wasBackend = get(videoState).kind === 'rtsp' || get(videoState).kind === 'native';
+  clearRtspTimers(); // end the RTSP reconnect loop on an explicit stop
   stopTracks();
   if (wasBackend) {
     void invoke('video_webrtc_stop').catch(() => {});
     void stopNativeMjpeg();
   }
-  patch({ enabled: false, status: 'off', error: null, rtspEngine: null, mjpegUrl: null });
+  patch({ enabled: false, status: 'off', error: null, rtspEngine: null, mjpegUrl: null, reconnecting: false, reconnectAttempt: 0 });
   savePrefs();
 }
 
@@ -734,6 +872,69 @@ export async function setVideoKind(kind: VideoKind): Promise<void> {
 export function setRtspUrl(rtspUrl: string): void {
   patch({ rtspUrl });
   savePrefs();
+}
+
+/** Set the active RTSP transport (udp/tcp/auto); restart if currently on a live RTSP feed. */
+export async function setRtspTransport(transport: RtspTransport): Promise<void> {
+  patch({ rtspTransport: transport });
+  savePrefs();
+  const st = get(videoState);
+  if (st.enabled && st.kind === 'rtsp') await startRtsp();
+}
+
+function genRtspId(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `rtsp-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+  }
+}
+
+/** Save the current URL + transport as a named entry in the connection list. Explicit action only —
+ *  connections are NEVER auto-saved. Name defaults to the host (rename inline); dedupes by URL. */
+export function saveRtspConnection(): void {
+  const st = get(videoState);
+  const url = st.rtspUrl.trim();
+  if (!url) return;
+  let host = url;
+  try {
+    host = new URL(url).host || url;
+  } catch {
+    /* keep the raw url as the name */
+  }
+  const list = st.rtspConnections.slice();
+  const i = list.findIndex((c) => c.url === url);
+  if (i >= 0) {
+    list[i] = { ...list[i], transport: st.rtspTransport };
+  } else {
+    list.push({ id: genRtspId(), name: host, url, transport: st.rtspTransport });
+  }
+  patch({ rtspConnections: list });
+  savePrefs();
+}
+
+/** Edit a saved connection (name / url / transport). */
+export function updateRtspConnection(id: string, p: Partial<Omit<RtspConnection, 'id'>>): void {
+  const list = get(videoState).rtspConnections.map((c) => (c.id === id ? { ...c, ...p } : c));
+  patch({ rtspConnections: list });
+  savePrefs();
+}
+
+/** Remove a saved connection. */
+export function removeRtspConnection(id: string): void {
+  const list = get(videoState).rtspConnections.filter((c) => c.id !== id);
+  patch({ rtspConnections: list });
+  savePrefs();
+}
+
+/** Load a saved connection into the active URL + transport and connect it. */
+export async function selectRtspConnection(id: string): Promise<void> {
+  const c = get(videoState).rtspConnections.find((x) => x.id === id);
+  if (!c) return;
+  if (get(videoState).kind !== 'rtsp' && get(videoState).enabled) stopVideo();
+  patch({ kind: 'rtsp', rtspUrl: c.url, rtspTransport: c.transport });
+  savePrefs();
+  await startRtsp();
 }
 
 /** Switch native device: probe it, repair the selection, restart if live. */

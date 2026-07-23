@@ -16,6 +16,7 @@
   import { t } from 'svelte-i18n';
   import { onMount, onDestroy } from 'svelte';
   import { videoStream, videoState, bindVideoEl, setMapLocation, setWidgetRect } from '$lib/stores/video';
+  import VideoReconnectOverlay from '$lib/components/video/VideoReconnectOverlay.svelte';
 
   let { width = 300, height = 150 }: { width?: number; height?: number } = $props();
 
@@ -89,11 +90,13 @@
       {$videoState.status === 'starting' ? $t('video.starting') : $t('video.off')}
     </div>
   {/if}
+  <VideoReconnectOverlay />
 </div>
 
 <style>
   .widget-card {
     box-sizing: border-box;
+    position: relative; /* anchor for the reconnect overlay */
     background: rgba(30, 30, 30, 0.75);
     backdrop-filter: blur(10px);
     border: 1px solid rgba(255, 255, 255, 0.08);

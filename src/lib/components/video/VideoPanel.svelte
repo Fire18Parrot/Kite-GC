@@ -25,6 +25,12 @@
     setVideoMirror,
     setVideoKind,
     setRtspUrl,
+    setRtspTransport,
+    saveRtspConnection,
+    updateRtspConnection,
+    removeRtspConnection,
+    selectRtspConnection,
+    type RtspTransport,
     toggleFloating,
     enterPiP,
     pipSupported,
@@ -45,8 +51,12 @@
   import Button from '$lib/components/panel/Button.svelte';
   import Toggle from '$lib/components/panel/Toggle.svelte';
   import { isLinux } from '$lib/platform';
+  import VideoReconnectOverlay from '$lib/components/video/VideoReconnectOverlay.svelte';
 
   let videoEl = $state<HTMLVideoElement | null>(null);
+  // Which saved RTSP connection is being edited inline (null = none).
+  let editingRtspId = $state<string | null>(null);
+  const inputVal = (e: Event) => (e.currentTarget as HTMLInputElement).value;
 
   // Bind the preview element to the shared MediaStream (camera or rtsp via captureStream).
   $effect(() => {
@@ -258,6 +268,7 @@
           {/if}
         </div>
       {/if}
+      <VideoReconnectOverlay />
     </div>
 
     {#if $videoState.status === 'live'}
@@ -381,16 +392,77 @@
         </div>
       {/if}
     {:else}
-      <label class="field">
+      <!-- Direct connect: URL + transport, with an explicit Save-to-list button (never auto-saved). -->
+      <div class="field">
         <span class="label">{$t('video.rtspUrl')}</span>
-        <input
-          class="text-input"
-          type="text"
-          placeholder="rtsp://192.168.1.10:554/live"
-          value={$videoState.rtspUrl}
-          onchange={(e) => setRtspUrl((e.currentTarget as HTMLInputElement).value)}
-        />
-      </label>
+        <div class="rtsp-url-row">
+          <input
+            class="text-input"
+            type="text"
+            placeholder="rtsp://192.168.1.10:554/cam"
+            value={$videoState.rtspUrl}
+            onchange={(e) => setRtspUrl(inputVal(e))}
+          />
+          <select
+            class="rtsp-transport"
+            value={$videoState.rtspTransport}
+            title={$t('video.rtspTransportHint')}
+            onchange={(e) => setRtspTransport((e.currentTarget as HTMLSelectElement).value as RtspTransport)}
+          >
+            <option value="auto">{$t('video.rtspAuto')}</option>
+            <option value="udp">UDP</option>
+            <option value="tcp">TCP</option>
+          </select>
+          <button
+            class="rtsp-save"
+            title={$t('video.rtspSave')}
+            aria-label={$t('video.rtspSave')}
+            disabled={!$videoState.rtspUrl.trim()}
+            onclick={saveRtspConnection}
+          >💾</button>
+        </div>
+      </div>
+
+      <!-- Saved connections: single-line rows, selectable / editable / deletable (ADS-B-provider style). -->
+      {#if $videoState.rtspConnections.length}
+        <div class="rtsp-list">
+          {#each $videoState.rtspConnections as c (c.id)}
+            <div class="rtsp-item" class:active={c.url === $videoState.rtspUrl}>
+              {#if editingRtspId === c.id}
+                <input
+                  class="rtsp-edit rtsp-edit-name"
+                  placeholder={$t('video.rtspName')}
+                  value={c.name}
+                  onchange={(e) => updateRtspConnection(c.id, { name: inputVal(e) })}
+                />
+                <input
+                  class="rtsp-edit"
+                  placeholder="rtsp://…"
+                  value={c.url}
+                  onchange={(e) => updateRtspConnection(c.id, { url: inputVal(e) })}
+                />
+                <select
+                  class="rtsp-transport"
+                  value={c.transport}
+                  onchange={(e) => updateRtspConnection(c.id, { transport: (e.currentTarget as HTMLSelectElement).value as RtspTransport })}
+                >
+                  <option value="auto">{$t('video.rtspAuto')}</option>
+                  <option value="udp">UDP</option>
+                  <option value="tcp">TCP</option>
+                </select>
+                <button class="rtsp-item-btn" title={$t('video.rtspDone')} aria-label={$t('video.rtspDone')} onclick={() => (editingRtspId = null)}>✓</button>
+              {:else}
+                <button class="rtsp-item-main" title={c.url} onclick={() => selectRtspConnection(c.id)}>
+                  <span class="rtsp-item-name">{c.name || c.url}</span>
+                  <span class="rtsp-item-transport">{c.transport === 'auto' ? $t('video.rtspAuto') : c.transport.toUpperCase()}</span>
+                </button>
+                <button class="rtsp-item-btn" title={$t('video.rtspEdit')} aria-label={$t('video.rtspEdit')} onclick={() => (editingRtspId = c.id)}>✎</button>
+                <button class="rtsp-item-btn del" title={$t('video.rtspDelete')} aria-label={$t('video.rtspDelete')} onclick={() => removeRtspConnection(c.id)}>✕</button>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
 
       {#if engineChecked && !engineVer}
         <!-- go2rtc is required for any RTSP source. -->
@@ -526,6 +598,87 @@
   }
   .hint { font-size: 11px; color: #777; margin: 0; }
   .hint.err { color: #d40000; }
+
+  /* RTSP direct-connect row + saved-connection list */
+  .rtsp-url-row { display: flex; align-items: center; gap: 6px; }
+  .rtsp-url-row .text-input { flex: 1; min-width: 0; }
+  .rtsp-transport {
+    height: 28px;
+    padding: 0 6px;
+    background: #434343;
+    color: #e0e0e0;
+    border: 1px solid #555;
+    border-radius: 4px;
+    font-size: 12px;
+    flex: 0 0 auto;
+  }
+  .rtsp-save {
+    height: 28px;
+    min-width: 30px;
+    padding: 0 6px;
+    background: #37a8db;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .rtsp-save:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .rtsp-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .rtsp-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: #2e2e2e;
+    border: 1px solid #272727;
+    border-radius: 4px;
+    padding: 3px 4px 3px 6px;
+  }
+  .rtsp-item.active { border-color: rgba(55, 168, 219, 0.75); }
+  .rtsp-item-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    background: none;
+    border: none;
+    color: #e0e0e0;
+    cursor: pointer;
+    text-align: left;
+    padding: 3px 2px;
+    font-size: 12px;
+  }
+  .rtsp-item-main:hover .rtsp-item-name { color: #37a8db; }
+  .rtsp-item-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rtsp-item-transport { flex: 0 0 auto; font-size: 10px; color: #949494; letter-spacing: 0.04em; }
+  .rtsp-item-btn {
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    background: none;
+    border: none;
+    color: #949494;
+    cursor: pointer;
+    border-radius: 3px;
+    font-size: 12px;
+  }
+  .rtsp-item-btn:hover { background: #3a3a3a; color: #e0e0e0; }
+  .rtsp-item-btn.del:hover { background: rgba(212, 0, 0, 0.3); color: #ff4444; }
+  .rtsp-edit {
+    flex: 1;
+    min-width: 0;
+    height: 26px;
+    padding: 0 6px;
+    background: #434343;
+    color: #e0e0e0;
+    border: 1px solid #555;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .rtsp-edit-name { flex: 0 0 90px; }
 
   .ffmpeg-box {
     display: flex;

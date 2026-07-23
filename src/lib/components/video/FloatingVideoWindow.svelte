@@ -27,6 +27,7 @@
     setMapLocation,
     toggleFloating,
   } from '$lib/stores/video';
+  import VideoReconnectOverlay from '$lib/components/video/VideoReconnectOverlay.svelte';
 
   // True while the map occupies this floating frame (so this window shows the map, not video).
   const mapHere = $derived($videoState.mapLocation === 'floating');
@@ -273,6 +274,7 @@
         {:else}
           <div class="fw-ph">{$videoState.status === 'starting' ? $t('video.starting') : $t('video.off')}</div>
         {/if}
+        <VideoReconnectOverlay />
       </div>
     {/if}
 
