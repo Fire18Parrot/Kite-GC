@@ -268,6 +268,9 @@ impl Go2Rtc {
             "go2rtc not found — download it in the Video panel or place it next to the app / on PATH.",
         )?;
 
+        // Fresh spawn → any surviving reader from a dead instance is stale; sweep it first.
+        kill_stale_readers();
+
         // Pick free loopback ports: one for the HTTP API, one for go2rtc's own RTSP server (used as
         // the internal target for the ffmpeg-source fallback — must NOT collide with the user's RTSP
         // source, e.g. obs-rtspserver also defaults to 8554).
@@ -344,12 +347,66 @@ impl Go2Rtc {
     }
 
     /// Stop the running go2rtc process (if any). Idempotent.
+    ///
+    /// Best-effort graceful teardown first: DELETE the stream via the API so go2rtc reaps its
+    /// spawned ffmpeg readers. A bare `child.kill()` orphans them (observed on Windows): the
+    /// leaked readers keep holding RTSP sessions on the remote server — which wedged the
+    /// UAV-Link Pi's shared media (new sessions starved until a server restart).
     pub fn stop(&self) {
         if let Some(mut r) = self.inner.lock().unwrap().take() {
+            delete_stream_blocking(r.api_port);
+            // Give go2rtc a moment to terminate the ffmpeg producer before the hard kill.
+            std::thread::sleep(Duration::from_millis(300));
             let _ = r.child.kill();
             let _ = r.child.wait();
             eprintln!("go2rtc stopped (was on :{}).", r.api_port);
         }
+    }
+}
+
+/// Raw-HTTP `DELETE /api/streams?src=kite` against the local go2rtc API (std TcpStream — this runs
+/// in sync contexts like `stop()`/app-exit where no async runtime is guaranteed). Best-effort.
+fn delete_stream_blocking(api_port: u16) {
+    let addr: SocketAddr = ([127, 0, 0, 1], api_port).into();
+    if let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
+        let _ = s.set_write_timeout(Some(Duration::from_millis(300)));
+        let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
+        let req = format!(
+            "DELETE /api/streams?src=kite HTTP/1.1\r\nHost: 127.0.0.1:{api_port}\r\nConnection: close\r\n\r\n"
+        );
+        use std::io::{Read as _, Write as _};
+        let _ = s.write_all(req.as_bytes());
+        let mut buf = [0u8; 256];
+        let _ = s.read(&mut buf); // wait for the response so go2rtc actually processed it
+    }
+}
+
+/// Kill stale ffmpeg readers left over from a previous, no-longer-running go2rtc instance (a hard
+/// app exit orphans them — go2rtc's children outlive it). They keep consuming the remote RTSP
+/// server. Matched narrowly by command line: go2rtc readers publish to `rtsp://127.0.0.1:<port>/kite`,
+/// which no other ffmpeg we spawn (MJPEG server, probes) or a user's own ffmpeg ever has. Called
+/// only on the fresh-spawn path, where by definition none of OUR readers can be legitimate.
+fn kill_stale_readers() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process -Filter \"Name='ffmpeg.exe'\" | Where-Object { $_.CommandLine -match '127\\.0\\.0\\.1:\\d+/kite' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+        ]);
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        cmd.stdout(Stdio::null()).stderr(Stdio::null()).stdin(Stdio::null());
+        let _ = cmd.status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("pkill")
+            .args(["-f", r"ffmpeg.*rtsp://127\.0\.0\.1:[0-9]+/kite"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 

@@ -74,7 +74,11 @@ pub async fn video_webrtc_start(
     } else {
         url.clone()
     };
-    let client = reqwest::Client::new();
+    // Bounded: never let a wedged go2rtc freeze the frontend's reconnect loop.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
     let resp = client
         .put(format!("http://127.0.0.1:{port}/api/streams"))
         .query(&[("name", STREAM_NAME), ("src", src.as_str())])
@@ -93,7 +97,13 @@ pub async fn video_webrtc_offer(sdp: String, engine: State<'_, Go2Rtc>) -> Resul
     let port = engine
         .port()
         .ok_or("go2rtc is not running — start the stream first")?;
-    let client = reqwest::Client::new();
+    // Bounded: go2rtc blocks this answer until the producer probes the source — on a wedged/dead
+    // RTSP server that wait is unbounded and froze the frontend's reconnect loop. 15 s is enough
+    // for any healthy source (probe is normally <2 s).
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
     let resp = client
         .post(format!("http://127.0.0.1:{port}/api/webrtc"))
         .query(&[("src", STREAM_NAME)])
