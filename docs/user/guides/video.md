@@ -14,7 +14,9 @@ is remembered between sessions.
   listed automatically). No extra downloads.
 - **Native Capture (Advanced)** — a local capture device opened via Kite's capture engine for **more
   control and wider device support**. See the comparison below.
-- **RTSP (network)** — enter the stream URL (e.g. from your video receiver or an RTSP server).
+- **RTSP (network)** — enter the stream URL (e.g. from your video receiver or an RTSP server), pick a
+  **transport**, and optionally **save the connection** to a list for one-click recall — see
+  **[RTSP connections](#rtsp-connections-transport-and-auto-reconnect)** below.
 
 ![The Video panel](../assets/guides/video/video_panel.png)
 /// caption
@@ -44,6 +46,30 @@ Native additionally reaches devices that only the capture engine can see.
   for the chosen resolution.
 - **Mirror** — flip the image horizontally (handy for front-facing cameras). Applies to every place the
   feed is shown.
+
+### RTSP connections, transport and auto-reconnect
+
+The RTSP source has a small **connection manager** built in:
+
+- **Direct connect** — type the `rtsp://…` URL and press Start. Next to the URL sits the **transport**
+  selector:
+    - **Auto** (default) — tries the engine's native reader first, then the ffmpeg fallback. Right for
+      most sources.
+    - **UDP** — lowest latency; **required for UDP-only servers** (some FPV / air-unit streamers). Uses
+      the ffmpeg helper.
+    - **TCP** — for sources that only speak interleaved TCP, or when UDP is blocked by the network.
+- **Save it** — the **💾 button** stores the current URL + transport as a named entry (named after the
+  host; rename it via ✎). Connections are **only saved when you press the button** — never
+  automatically.
+- **The list** — each saved connection is a one-line entry: **click it to load and connect**, ✎ edits
+  name / URL / transport inline, ✕ removes it. The entry matching the current URL is highlighted.
+
+**Auto-reconnect:** if a running RTSP feed drops or stalls — a radio hole on a cellular link, the
+source restarting, a network change — Kite **reconnects automatically and keeps trying indefinitely**
+until the feed returns or you stop it. While it retries, every video surface shows a
+**"Reconnecting… (n)"** overlay with the attempt count and a **Stop** button. Brief dropouts on a live
+feed are given a few seconds to heal on their own before a full reconnect is forced, so momentary
+signal dips don't interrupt the stream unnecessarily.
 
 !!! note "Helpers download themselves"
     **Camera (device)** needs nothing extra. **Native Capture** uses the bundled **ffmpeg** engine, and

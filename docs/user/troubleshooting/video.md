@@ -26,6 +26,17 @@ you start an RTSP source. If a stream won't come up:
 - **Check the URL and reachability.** A typo, a camera that's off, a firewall, or a source on a different
   network will all stop it. Confirm the exact `rtsp://…` URL works in another player (e.g. VLC) from the
   same machine.
+- **Match the transport.** Some servers are **UDP-only** (they reject TCP clients) — set the connection's
+  **Transport** to **UDP** in the Video panel (needs the ffmpeg helper). Conversely, if UDP is blocked on
+  your network, try **TCP**. **Auto** tries the native reader first and falls back to ffmpeg.
+
+## The stream keeps showing "Reconnecting…"
+
+The overlay means Kite lost the feed and is retrying — it will **keep trying until the stream returns or
+you press Stop**. If it never comes back: the source is down or unreachable (check it in another player),
+the transport doesn't match the server (see above), or a firewall started blocking the media packets. A
+few reconnect cycles in a row are normal when a source restarts or the network path changes (e.g.
+switching between Wi-Fi and a cellular link).
 
 ## The picture stutters or shows "frames out of order"
 
