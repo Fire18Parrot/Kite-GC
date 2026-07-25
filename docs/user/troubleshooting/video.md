@@ -66,6 +66,40 @@ With a sensibly-configured encoder, end-to-end latency is low (roughly a couple 
 If it's much worse, the cause is usually the **source**: a large keyframe interval, a big encoder buffer,
 or a non-low-latency tuning. Tune the encoder/camera for low-latency streaming.
 
+## Linux: high CPU load, stuttering, or "Reconnecting…" that never settles
+
+On Linux, Kite depends on your distribution's browser-engine and GStreamer packages for all video work
+— see the **[platform notes](../guides/video.md#platform-notes-what-to-expect-per-operating-system)**
+in the guide for what that means. The log tells you exactly what your system offers. Set **Settings →
+Diagnostics → Log Level** to **Warning** (the default is enough), restart Kite, start your stream, then
+open the log and look for these lines:
+
+```
+[webkit] WebKitGTK 2.xx.y — enable-webrtc set, reads back as true
+[gstreamer] webrtcbin=false · h264 decoders=[] — …
+WebRTC is unavailable in this WebView — falling back to the MJPEG image path
+```
+
+- **`webrtcbin=false`** — the efficient direct path is unavailable, so Kite converts the stream frame by
+  frame, which is what drives the CPU up. Install the plugin package and restart:
+  ```bash
+  sudo apt install gstreamer1.0-plugins-bad     # Debian / Ubuntu / Raspberry Pi OS
+  ```
+- **`h264 decoders=[]`** — no H.264 decoder is installed at all; add `gstreamer1.0-libav` as well.
+- **"WebRTC is unavailable …"** without either of the above — your engine build genuinely has no WebRTC.
+  The converted-image path still gives you a picture; reducing the source resolution or frame rate at the
+  camera end is then the effective lever.
+
+If the CPU stays high even with a small picture, that is the conversion itself, not Kite's interface.
+Software conversion of a 720p60 stream is beyond a single-board computer regardless of settings.
+
+## Raspberry Pi: garbled or black window right after start
+
+A known quirk of the Pi's graphics driver: the very first drawing surface is often invalid. Kite detects
+a Raspberry Pi and briefly resizes its own window once the interface has loaded, which forces a clean
+surface. If you still see it, the log line `[gpu] Raspberry Pi framebuffer nudge: …` tells you the
+workaround ran and which variant it used.
+
 ## Still stuck?
 
 Grab a **diagnostic log** (**Settings → Diagnostics → Log Level = Debug**, reproduce, then **Open Log

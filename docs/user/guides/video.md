@@ -87,8 +87,9 @@ The same feed can appear in several places at once (they all share one stream):
   dragging it to the **bottom-left corner snaps it there**, where it **displaces the bottom widget dock**
   to make room (the dock shrinks by the window's size). Drag it away from the corner to un-snap and
   free-float. The **top-right corner grip resizes** it (aspect-locked, touch-friendly).
-- **In a detached window** — a separate, free-floating **OS window** you can place anywhere, including
-  **outside the app** or on a second monitor. Opened from the Video panel; because it lives outside the
+- **In a detached window** (**Windows only** — see the [platform notes](#platform-notes-what-to-expect-per-operating-system);
+  the button is simply absent elsewhere) — a separate, free-floating **OS window** you can place anywhere,
+  including **outside the app** or on a second monitor. Opened from the Video panel; because it lives outside the
   app it's closed from the OS (not from inside Kite), and — unlike the floating window — it **can't host
   the map** (no swap). It's also the **lightest** option: the OS draws it directly, so on low-power
   systems using only the detached window keeps GPU load to a minimum.
@@ -117,6 +118,46 @@ How interactive the swapped-in **mini-map** is depends on where it landed:
 /// caption
 Swapped: the live video fills the background while the map rides in the smaller frame.
 ///
+
+## Platform notes: what to expect per operating system
+
+Video is the one part of Kite that depends heavily on components Kite does **not** ship: the operating
+system's built-in browser engine and its media plugins. That works out very differently per platform,
+and it is only fair to say so plainly.
+
+**Windows and macOS are the more predictable hosts for video.** Both ship a single, consistent media
+stack, so a network stream is played directly by the system's hardware-accelerated decoder. If a smooth,
+low-CPU, low-latency feed is important to you — and especially if you plan to fly with it — those are
+the platforms we can most confidently recommend.
+
+**On Linux, video support is provided as-is.** Kite runs in WebKitGTK there, which delegates all video
+work to GStreamer — and which plugins your distribution installs is entirely up to your distribution.
+There are hundreds of combinations of distro, desktop, graphics driver and plugin set, and we cannot
+test or support them all. Concretely, these are things Kite cannot fix from its side:
+
+- **Whether an RTSP stream can be played directly at all.** The efficient path needs WebRTC support in
+  the browser engine, which in turn needs GStreamer's `webrtcbin` element (usually the
+  `gstreamer1.0-plugins-bad` package). If it's missing, the engine silently offers no WebRTC and Kite
+  falls back to a **converted image stream** — this still works, but it has to decode and re-encode
+  every frame, which costs **considerably more CPU**. On a small machine that can mean a stuttering
+  picture. Kite records what your system provides in the diagnostic log (see
+  **[Video troubleshooting](../troubleshooting/video.md)**), so you can check and install what's missing.
+- **Whether decoding uses the graphics hardware.** Hardware video decoding depends on your driver and
+  the installed plugins, and on some machines it simply isn't available — everything is then done on the
+  CPU. We cannot guarantee hardware decoding on Linux, and single-board computers with no H.264 decoder
+  in hardware (the Raspberry Pi 5, for example) will always decode in software.
+- **Local camera quirks.** On Linux the system camera layer can be slow or unresponsive on some setups.
+  Kite works around the worst cases (it caps the automatic resolution and frame rate, and routes the
+  advanced capture path around that layer entirely), but a camera the system itself can't open cleanly
+  is out of reach.
+- **Picture-in-Picture** (the detached "Video Window") is a Windows-only feature — neither the Linux nor
+  the macOS browser engine offers the interface Kite would need for it. All the in-app surfaces
+  (panel, widget, floating window, full-screen swap) work everywhere.
+
+None of this means Linux is unusable — a well-equipped desktop distribution generally plays video fine,
+and it is a first-class platform for everything else Kite does. It only means that **if video is your
+priority, Linux is the platform where you may have to do some work yourself**, and we can't promise a
+particular result on a particular machine.
 
 ## Where to go next
 
