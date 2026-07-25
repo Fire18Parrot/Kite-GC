@@ -61,16 +61,6 @@ The RTSP source has a small **connection manager** built in:
 - **Save it** — the **💾 button** stores the current URL + transport as a named entry (named after the
   host; rename it via ✎). Connections are **only saved when you press the button** — never
   automatically.
-- **Low-CPU mode (MediaSource)** — a per-machine option, off by default. It hands the stream to the
-  system's own video decoder instead of converting it, which cuts CPU load dramatically and makes higher
-  resolutions possible on weak hardware — but the picture runs roughly a second behind. Intended for
-  machines that can't sustain the normal path (see the [platform notes](#platform-notes-what-to-expect-per-operating-system));
-  leave it off whenever latency matters.
-- **Converted stream size** (Linux only) — when the stream plays over the **converted fallback path**
-  (see the platform notes), this scales it down **before** conversion: Original, 960 px or 640 px wide.
-  A smaller size cuts the conversion CPU load sharply on both ends with no extra delay. Pick a size close
-  to how large the video is actually shown on screen — the picture only gets softer when it is displayed
-  larger than the chosen size. Has no effect on the direct playback path.
 - **The list** — each saved connection is a one-line entry: **click it to load and connect**, ✎ edits
   name / URL / transport inline, ✕ removes it. The entry matching the current URL is highlighted.
 
@@ -149,11 +139,10 @@ test or support them all. Concretely, these are things Kite cannot fix from its 
   among them — ship a browser engine built **without** the direct (WebRTC) video path, and that cannot
   be installed after the fact. Kite then falls back to a **converted image stream**: it still works, but
   every frame is decoded and re-encoded, which costs **considerably more CPU** and on a small machine
-  means a stuttering picture at higher resolutions. For those machines the Video panel offers
-  **Low-CPU mode (MediaSource)**, which plays the stream directly instead of converting it — much less
-  load and higher resolutions, at the price of roughly a second of extra delay. Kite records what your
-  system provides in the diagnostic log, so you can see which path you're on (see
-  **[Video troubleshooting](../troubleshooting/video.md)**).
+  means a stuttering picture at higher resolutions. The effective remedy is to **send a smaller or
+  slower stream from the source** (e.g. 480p instead of 720p, or 30 instead of 60 fps) — that saves the
+  work at every stage at once. Kite records what your system provides in the diagnostic log, so you can
+  see which path you're on (see **[Video troubleshooting](../troubleshooting/video.md)**).
 - **Whether decoding uses the graphics hardware.** Hardware video decoding depends on your driver and
   the installed plugins, and on some machines it simply isn't available — everything is then done on the
   CPU. We cannot guarantee hardware decoding on Linux, and single-board computers with no H.264 decoder

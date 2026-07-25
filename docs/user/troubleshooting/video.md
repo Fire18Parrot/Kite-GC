@@ -90,21 +90,19 @@ sustain. Two things are worth knowing:
   there. If `webrtcbin=false` appears in your log it is still worth installing
   `gstreamer1.0-plugins-bad` (and `gstreamer1.0-libav` if the decoder list is empty) — that is a genuine
   prerequisite — but do not expect it to be sufficient.
-  Note that these package installs only affect the **system installation (.deb)** — the **AppImage**
-  ships its own self-contained media stack (including the H.264 decoder) and neither sees nor needs
-  the system's media packages.
-- **Shrink the converted stream.** The Video panel's **Converted stream size** option (Linux only)
-  scales the fallback stream down before conversion — 960 px or 640 px instead of the full source size.
-  For a video shown in a window or widget this is usually invisible and costs no latency, while the
-  conversion load drops to a fraction. Try this first.
-- **Or use the low-CPU mode.** The Video panel also offers **Low-CPU mode (MediaSource)** for the RTSP
-  source. It plays the stream directly rather than converting it, so the CPU load drops sharply and
-  higher resolutions become possible — at the price of roughly a second of extra delay. That trade is
-  fine for setup, monitoring or checking a camera; leave it **off** when you need the lowest latency.
+  Note that these package installs only affect the **system installation (.deb)**: the **AppImage**
+  brings its own browser engine and does not use the system's media packages at all. If video matters
+  to you on Linux, prefer the **.deb / system installation** — it uses your distribution's engine and
+  plugins, which you can at least influence.
+- **Send a smaller or slower stream from the source.** This is the one lever that really works, because
+  it removes the work at *every* stage — network, decoding, conversion and display. On a single-board
+  computer, 480p at 30 fps is comfortable where 720p60 is not. Set it where the stream is produced (your
+  video transmitter, camera or streaming server), not in Kite.
+- **Show the video in fewer places at once.** Every visible surface (panel preview, widget, floating
+  window) is drawn separately. Closing the ones you don't need frees noticeable load.
 
-If the CPU stays high with the mode off and a small picture, that is the conversion itself, not Kite's
-interface: converting a 720p60 stream in software is beyond a single-board computer regardless of
-settings.
+Converting a 720p60 stream in software is simply beyond a small machine, and no setting inside Kite
+changes that arithmetic — the picture has to get smaller or slower at the source.
 
 ## Raspberry Pi: garbled or black window right after start
 
