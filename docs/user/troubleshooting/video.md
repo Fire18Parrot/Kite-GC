@@ -90,6 +90,9 @@ sustain. Two things are worth knowing:
   there. If `webrtcbin=false` appears in your log it is still worth installing
   `gstreamer1.0-plugins-bad` (and `gstreamer1.0-libav` if the decoder list is empty) — that is a genuine
   prerequisite — but do not expect it to be sufficient.
+  Note that these package installs only affect the **system installation (.deb)** — the **AppImage**
+  ships its own self-contained media stack (including the H.264 decoder) and neither sees nor needs
+  the system's media packages.
 - **Shrink the converted stream.** The Video panel's **Converted stream size** option (Linux only)
   scales the fallback stream down before conversion — 960 px or 640 px instead of the full source size.
   For a video shown in a window or widget this is usually invisible and costs no latency, while the
