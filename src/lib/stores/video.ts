@@ -91,6 +91,10 @@ export interface VideoState {
    *  per-connection one — it exists for machines whose WebView can't do WebRTC and whose CPU can't
    *  afford the MJPEG transcode. Trades latency for load; see `negotiateMse`. */
   rtspMse: boolean;
+  /** Downscale the MJPEG-fallback transcode to this width (0 = original size). Host-level like
+   *  `rtspMse`: the fallback is CPU-decoded at both ends, so a small host driving a small window
+   *  pays full-source-size prices for nothing. Only the MJPEG path uses it — WebRTC never re-encodes. */
+  rtspMaxWidth: number;
   /** Active RTSP reader once live (native go2rtc client vs ffmpeg fallback); runtime-only. */
   rtspEngine: RtspEngine;
   /** Runtime-only: true while the infinite RTSP auto-reconnect loop is running (link dropped/stalled). */
@@ -146,6 +150,7 @@ interface VideoPrefs {
   rtspTransport: RtspTransport;
   rtspConnections: RtspConnection[];
   rtspMse: boolean;
+  rtspMaxWidth: number;
   nativeDevice: string | null;
   nativeDeviceName: string | null;
   nativeWidth: number;
@@ -169,6 +174,7 @@ const PREF_DEFAULTS: VideoPrefs = {
   rtspTransport: 'auto',
   rtspConnections: [],
   rtspMse: false,
+  rtspMaxWidth: 0,
   nativeDevice: null,
   nativeDeviceName: null,
   nativeWidth: 1280,
@@ -200,6 +206,7 @@ function loadPrefs(): VideoPrefs {
         rtspTransport: p.rtspTransport ?? 'auto',
         rtspConnections: Array.isArray(p.rtspConnections) ? p.rtspConnections : [],
         rtspMse: p.rtspMse ?? false,
+        rtspMaxWidth: p.rtspMaxWidth ?? 0,
         nativeDevice: p.nativeDevice ?? p.v4l2Device ?? null,
         nativeDeviceName: p.nativeDeviceName ?? null,
         nativeWidth: p.nativeWidth ?? 1280,
@@ -229,6 +236,7 @@ function savePrefs(): void {
         rtspTransport: s.rtspTransport,
         rtspConnections: s.rtspConnections,
         rtspMse: s.rtspMse,
+        rtspMaxWidth: s.rtspMaxWidth,
         nativeDevice: s.nativeDevice,
         nativeDeviceName: s.nativeDeviceName,
         nativeWidth: s.nativeSel.width,
@@ -270,6 +278,7 @@ const INITIAL: VideoState = {
   rtspTransport: boot.rtspTransport,
   rtspConnections: boot.rtspConnections,
   rtspMse: boot.rtspMse,
+  rtspMaxWidth: boot.rtspMaxWidth,
   rtspEngine: null,
   reconnecting: false,
   reconnectAttempt: 0,
@@ -301,6 +310,34 @@ export const videoState = writable<VideoState>({ ...INITIAL });
  */
 export const videoStream = writable<MediaStream | null>(null);
 
+/** Per-second snapshot of the WebRTC inbound video pipeline, published by the RTSP stall monitor
+ *  (which polls `getStats()` once a second anyway). Splits an unstable picture into its stages:
+ *  `recvFps` (frames arriving from go2rtc — a shortfall here is upstream of the WebView),
+ *  `decodeFps`/`framesDropped` (decoder keeping up or not), and the engine's own playout counters
+ *  (`freezeCount`, `playoutDelayMs`). Consumed by the Debug Monitor's Video tab; null when no
+ *  WebRTC feed is running. */
+export interface VideoRtcStats {
+  /** framesReceived per second over the last poll interval. */
+  recvFps: number;
+  /** framesDecoded per second over the last poll interval. */
+  decodeFps: number;
+  /** The decoder's own frames-per-second estimate, when the engine reports one. */
+  engineFps: number | null;
+  /** Cumulative frames dropped before presentation (received but never shown). */
+  framesDropped: number;
+  /** Cumulative RTP packets lost on the (loopback) transport — anything but 0 is remarkable. */
+  packetsLost: number;
+  /** Cumulative playout freezes counted by the engine, if reported. */
+  freezeCount: number | null;
+  /** Total frozen time in ms, if reported. */
+  freezeMs: number | null;
+  /** RFC 3550 interarrival jitter in ms, if reported. */
+  jitterMs: number | null;
+  /** Average jitter-buffer (playout) delay per emitted frame in ms, if reported. */
+  playoutDelayMs: number | null;
+}
+export const videoRtcStats = writable<VideoRtcStats | null>(null);
+
 function patch(p: Partial<VideoState>): void {
   videoState.update((s) => ({ ...s, ...p }));
 }
@@ -312,7 +349,7 @@ function patch(p: Partial<VideoState>): void {
  *  in DevTools. A tester on a Raspberry Pi has neither: a release build has no console, and the log file
  *  the Diagnostics page hands out never saw a word of it. Stream aborts go in at **warn**, so they show
  *  up at the default log level; routine lifecycle detail is `info` (captured at Debug). */
-function logVideo(level: 'warn' | 'info', message: string): void {
+function logVideo(level: 'warn' | 'info' | 'debug', message: string): void {
   if (level === 'warn') console.warn(`[video] ${message}`);
   else console.log(`[video] ${message}`);
   void invoke('log_frontend', { level, area: 'video', message }).catch(() => {});
@@ -328,6 +365,10 @@ export function bindVideoEl(el: HTMLVideoElement | null, stream: MediaStream | n
  *  floating window / widget can size to the real aspect ratio (RTSP has no upfront caps). */
 export function reportVideoSize(width: number, height: number): void {
   if (!width || !height) return;
+  // Change-guarded: the MJPEG `<img>` path reports from onload, which SOME engines fire per multipart
+  // frame — an unguarded patch would churn the store at frame rate.
+  const s = get(videoState);
+  if (s.width === width && s.height === height) return;
   patch({ width, height, aspect: width / height });
 }
 
@@ -571,6 +612,7 @@ function closeRtc(): void {
   } catch {
     /* ignore */
   }
+  videoRtcStats.set(null);
 }
 
 /** Resolve once ICE gathering completes (or a short timeout) — HTTP signaling can't trickle,
@@ -706,24 +748,60 @@ function startRtspStallMonitor(pc: RTCPeerConnection): void {
   let sawFrames = false;
   let lastChange = performance.now();
   let warnedNoReport = false;
+  let prevFrames = -1;
+  let prevDecoded = 0;
+  let prevAt = performance.now();
+  let statTick = 0;
+  videoRtcStats.set(null);
   rtspMonitor = setInterval(() => {
     if (rtcConn !== pc) { if (rtspMonitor) { clearInterval(rtspMonitor); rtspMonitor = undefined; } return; }
     void pc.getStats().then((stats) => {
       if (rtcConn !== pc) return;
       let frames = 0;
       let bytes = 0;
+      let decoded = 0;
+      let dropped = 0;
+      let lost = 0;
+      let engineFps: number | null = null;
+      let freezes: number | null = null;
+      let freezeMs: number | null = null;
+      let jitterMs: number | null = null;
+      let playoutMs: number | null = null;
       let sawReport = false;
       stats.forEach((report) => {
         if (report.type !== 'inbound-rtp') return;
         // WebKit has historically reported the legacy `mediaType` instead of the spec's `kind`, and a
         // report carrying neither is counted too: mistaking a healthy feed for a dead one would put the
         // stream into a permanent reconnect loop, which is far worse than a missed stall.
-        const rr = report as RTCInboundRtpStreamStats & { mediaType?: string };
+        // The pipeline-quality fields beyond framesReceived/bytesReceived are optional per spec and
+        // engine-dependent — each is read defensively and shown as absent when not reported.
+        const rr = report as RTCInboundRtpStreamStats & {
+          mediaType?: string;
+          framesDecoded?: number;
+          framesDropped?: number;
+          framesPerSecond?: number;
+          freezeCount?: number;
+          totalFreezesDuration?: number;
+          jitter?: number;
+          jitterBufferDelay?: number;
+          jitterBufferEmittedCount?: number;
+          packetsLost?: number;
+        };
         const kind = rr.kind ?? rr.mediaType;
         if (kind && kind !== 'video') return;
         sawReport = true;
         frames += rr.framesReceived ?? 0;
         bytes += rr.bytesReceived ?? 0;
+        decoded += rr.framesDecoded ?? 0;
+        dropped += rr.framesDropped ?? 0;
+        lost += rr.packetsLost ?? 0;
+        if (rr.framesPerSecond !== undefined) engineFps = rr.framesPerSecond;
+        if (rr.freezeCount !== undefined) freezes = rr.freezeCount;
+        if (rr.totalFreezesDuration !== undefined) freezeMs = rr.totalFreezesDuration * 1000;
+        if (rr.jitter !== undefined) jitterMs = rr.jitter * 1000;
+        if (rr.jitterBufferDelay !== undefined && rr.jitterBufferEmittedCount) {
+          playoutMs = (rr.jitterBufferDelay / rr.jitterBufferEmittedCount) * 1000;
+        }
       });
       if (!sawReport) {
         // No inbound stats at all — we cannot measure, so we must not judge. Say so once.
@@ -735,6 +813,39 @@ function startRtspStallMonitor(pc: RTCPeerConnection): void {
       }
       const progress = frames || bytes;
       const now = performance.now();
+      // Publish the per-second pipeline snapshot (needs two polls for the rates).
+      if (prevFrames >= 0) {
+        const dt = (now - prevAt) / 1000;
+        if (dt > 0) {
+          videoRtcStats.set({
+            recvFps: Math.max(0, (frames - prevFrames) / dt),
+            decodeFps: Math.max(0, (decoded - prevDecoded) / dt),
+            engineFps,
+            framesDropped: dropped,
+            packetsLost: lost,
+            freezeCount: freezes,
+            freezeMs,
+            jitterMs,
+            playoutDelayMs: playoutMs,
+          });
+        }
+      }
+      prevFrames = frames;
+      prevDecoded = decoded;
+      prevAt = now;
+      // A periodic trace of the same numbers, so a tester's Debug-level log shows where a jittery
+      // picture loses its frames (receive vs decode vs playout) without the Debug Monitor.
+      statTick++;
+      if (statTick % 10 === 0) {
+        // Helper instead of inline ternaries: TS does not apply assignments made inside the forEach
+        // callback to the outer flow, so `x !== null` on these would narrow to `never`.
+        const ms = (v: number | null, digits = 0): string => (v === null ? '–' : `${v.toFixed(digits)}ms`);
+        logVideo(
+          'debug',
+          `RTC inbound: recv=${frames} decoded=${decoded} dropped=${dropped} lost=${lost}` +
+            ` freezes=${freezes ?? '–'}/${ms(freezeMs)} jitter=${ms(jitterMs, 1)} playoutDelay=${ms(playoutMs)}`,
+        );
+      }
       if (progress !== last) {
         if (last >= 0 && progress > last) sawFrames = true; // real advance, not the initial read
         last = progress;
@@ -1035,7 +1146,12 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
       return;
     }
     try {
-      await invoke('video_webrtc_start', { url, useFfmpeg: transport === 'udp', mjpeg: true });
+      await invoke('video_webrtc_start', {
+        url,
+        useFfmpeg: transport === 'udp',
+        mjpeg: true,
+        maxWidth: st.rtspMaxWidth > 0 ? st.rtspMaxWidth : null,
+      });
       const mjpegUrl = await buildMjpegUrl();
       patch({ status: 'live', mjpegUrl, error: null, rtspEngine: 'native', reconnecting: false, reconnectAttempt: 0 });
     } catch (e) {
@@ -1204,6 +1320,15 @@ export async function setRtspTransport(transport: RtspTransport): Promise<void> 
 /** Toggle the MediaSource path; restarts a live RTSP feed so the change takes effect immediately. */
 export async function setRtspMse(rtspMse: boolean): Promise<void> {
   patch({ rtspMse });
+  savePrefs();
+  const st = get(videoState);
+  if (st.enabled && st.kind === 'rtsp') await startRtsp();
+}
+
+/** Set the MJPEG-fallback transcode width cap (0 = original); restarts a live RTSP feed so the
+ *  re-registered go2rtc source takes effect immediately. */
+export async function setRtspMaxWidth(rtspMaxWidth: number): Promise<void> {
+  patch({ rtspMaxWidth });
   savePrefs();
   const st = get(videoState);
   if (st.enabled && st.kind === 'rtsp') await startRtsp();

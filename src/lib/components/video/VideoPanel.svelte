@@ -31,6 +31,7 @@
     removeRtspConnection,
     selectRtspConnection,
     setRtspMse,
+    setRtspMaxWidth,
     reportMjpegError,
     type RtspTransport,
     toggleFloating,
@@ -171,6 +172,18 @@
   let mjpegFps = $state(0);
   let _mjpegFrames = 0;
   let _mjpegLast = performance.now();
+  // Per-frame hook of the MJPEG <img>: count for the fps meter AND report the picture size. The
+  // <video> path gets width/height from onloadedmetadata, but an <img> feed never reported it — on
+  // Linux/RTSP the info line showed dashes and the floating window kept the default 16:9 aspect even
+  // for a 3:2 stream. naturalWidth is valid from the first displayed frame. (The fps half stays
+  // engine-dependent: WebKitGTK fires load only once for a multipart image, so no rate is measurable
+  // there — the resolution is, from that single event.)
+  function mjpegFrame(e: Event): void {
+    mjpegFrameTick();
+    const img = e.currentTarget as HTMLImageElement;
+    if (img.naturalWidth) reportVideoSize(img.naturalWidth, img.naturalHeight);
+  }
+
   function mjpegFrameTick(): void {
     _mjpegFrames++;
     const now = performance.now();
@@ -256,7 +269,7 @@
           src={$videoState.mjpegUrl}
           alt="Live video"
           class:mirror={$videoState.mirror}
-          onload={mjpegFrameTick}
+          onload={mjpegFrame}
           onerror={reportMjpegError}
         />
       {:else}
@@ -492,6 +505,22 @@
           <span class="label">{$t('video.rtspMse')}</span>
         </div>
         <p class="hint">{$t('video.rtspMseHint')}</p>
+
+        <!-- Width cap for the converted (MJPEG) fallback stream. Only meaningful where that fallback
+             exists (Linux WebViews without WebRTC): the transcode is CPU-decoded at BOTH ends, so on a
+             small host showing a small window, full source size is paid for nothing. -->
+        <label class="field mse-row">
+          <span class="label">{$t('video.rtspMaxWidth')}</span>
+          <select
+            value={String($videoState.rtspMaxWidth)}
+            onchange={(e) => setRtspMaxWidth(Number((e.currentTarget as HTMLSelectElement).value))}
+          >
+            <option value="0">{$t('video.rtspMaxWidthOff')}</option>
+            <option value="960">960 px</option>
+            <option value="640">640 px</option>
+          </select>
+        </label>
+        <p class="hint">{$t('video.rtspMaxWidthHint')}</p>
       {/if}
 
       {#if engineChecked && !engineVer}
@@ -580,10 +609,12 @@
     align-items: center;
     justify-content: center;
   }
-  .preview video { width: 100%; height: 100%; object-fit: contain; display: block; }
+  /* will-change: own compositing layer — see VideoWidget: keeps the 60 fps MJPEG <img> from
+     dirtying shared layer tiles every frame on WebKitGTK. */
+  .preview video { width: 100%; height: 100%; object-fit: contain; display: block; will-change: transform; }
   .preview video.mirror { transform: scaleX(-1); }
   .preview video.hidden { visibility: hidden; }
-  .preview img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .preview img { width: 100%; height: 100%; object-fit: contain; display: block; will-change: transform; }
   .preview img.mirror { transform: scaleX(-1); }
   .preview-placeholder {
     position: absolute;

@@ -70,11 +70,18 @@ pub async fn video_go2rtc_download(app_handle: AppHandle) -> Result<String, Stri
 /// client. The `input=rtsp/udp` template uses ffmpeg WITHOUT a forced `-rtsp_transport`, which is the
 /// only mode that reads quirky servers (e.g. obs-rtspserver, which 461s any forced transport). Used
 /// as the automatic fallback when the native client fails.
+///
+/// `max_width`: downscale the MJPEG transcode to this width (aspect kept by go2rtc). The fallback is
+/// decoded frame-by-frame on the CPU at BOTH ends (ffmpeg encodes, the WebView decodes), so on a small
+/// host serving a small window, transcoding at full source size is pure waste — a 640-wide transcode
+/// of a 720p60 source costs a fraction on either side. Ignored on the WebRTC/copy paths, which never
+/// re-encode.
 #[tauri::command]
 pub async fn video_webrtc_start(
     url: String,
     use_ffmpeg: bool,
     mjpeg: bool,
+    max_width: Option<u32>,
     engine: State<'_, Go2Rtc>,
 ) -> Result<(), String> {
     let port = engine.ensure_running()?;
@@ -87,7 +94,10 @@ pub async fn video_webrtc_start(
     // transport choice: that is the only variant that also reads UDP-only servers, and a connection
     // left on "Auto" would otherwise fail to open one at all.
     let src = if mjpeg {
-        format!("ffmpeg:{url}#input=rtsp/udp#video=mjpeg")
+        match max_width {
+            Some(w) if w > 0 => format!("ffmpeg:{url}#input=rtsp/udp#video=mjpeg#width={w}"),
+            _ => format!("ffmpeg:{url}#input=rtsp/udp#video=mjpeg"),
+        }
     } else if use_ffmpeg {
         format!("ffmpeg:{url}#input=rtsp/udp#video=copy")
     } else {

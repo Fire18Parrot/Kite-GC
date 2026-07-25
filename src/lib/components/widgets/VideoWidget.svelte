@@ -118,6 +118,10 @@
   video,
   img {
     object-fit: cover; /* crop to fill the 2:1 tile */
+    /* Own compositing layer: a 60 fps feed then only re-rasters/uploads its own rect instead of
+       dirtying the shared content layer's tiles every frame (matters on WebKitGTK/Pi; <video> gets a
+       layer anyway, the MJPEG <img> does NOT unless promoted). */
+    will-change: transform;
   }
   video.mirror,
   img.mirror {

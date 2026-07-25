@@ -336,6 +336,9 @@
     height: 100%;
     object-fit: cover;
     display: block;
+    /* Own compositing layer — see VideoWidget: keeps the 60 fps MJPEG <img> from dirtying shared
+       layer tiles every frame on WebKitGTK. */
+    will-change: transform;
   }
   .fw-body video.mirror,
   .fw-body img.mirror {
