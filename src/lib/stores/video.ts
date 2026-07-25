@@ -636,7 +636,7 @@ export async function startVideo(): Promise<void> {
 
 /** Register the source with go2rtc and complete one WebRTC negotiation. Throws on failure. */
 async function negotiateWebrtc(url: string, useFfmpeg: boolean): Promise<void> {
-  await invoke('video_webrtc_start', { url, useFfmpeg });
+  await invoke('video_webrtc_start', { url, useFfmpeg, mjpeg: false });
 
   const pc = new RTCPeerConnection({ iceServers: [] });
   rtcConn = pc;
@@ -839,8 +839,16 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
     if (!reconnect) {
       logVideo('warn', 'WebRTC is unavailable in this WebView — falling back to the MJPEG image path');
     }
+    // Serving MJPEG means go2rtc has to TRANSCODE (an H.264 camera carries no MJPEG track), and that
+    // needs ffmpeg. Missing ffmpeg makes the endpoint fail instantly — a dead end no reconnect fixes.
+    const ffmpeg = await invoke<string | null>('video_ffmpeg_status').catch(() => null);
+    if (!ffmpeg) {
+      logVideo('warn', 'MJPEG fallback needs ffmpeg for transcoding and it is not installed');
+      patch({ status: 'error', error: get(t)('video.ffmpegNativeMissing'), reconnecting: false, reconnectAttempt: 0 });
+      return;
+    }
     try {
-      await invoke('video_webrtc_start', { url, useFfmpeg: transport === 'udp' });
+      await invoke('video_webrtc_start', { url, useFfmpeg: transport === 'udp', mjpeg: true });
       const mjpegUrl = await buildMjpegUrl();
       patch({ status: 'live', mjpegUrl, error: null, rtspEngine: 'native', reconnecting: false, reconnectAttempt: 0 });
     } catch (e) {

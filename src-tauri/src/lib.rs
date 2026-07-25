@@ -286,8 +286,30 @@ pub fn run() {
                             // sits behind the crate's `v2_38` feature, which would raise our build-time
                             // WebKitGTK requirement (CI deliberately builds against ubuntu-22.04). By
                             // name it is simply a no-op on older runtimes that lack the property.
+                            //
+                            // Logged in full: a Pi field test showed `webrtc=false` in the frontend
+                            // even with this in place, and "property missing", "set but ignored" and
+                            // "set but GStreamer can't back it" are three different problems that look
+                            // identical from the outside. The runtime WebKitGTK version comes along
+                            // because it decides which of them is even possible — and because a Linux
+                            // bug report is worth little without it.
+                            let (major, minor, micro) = unsafe {
+                                (
+                                    webkit2gtk::ffi::webkit_get_major_version(),
+                                    webkit2gtk::ffi::webkit_get_minor_version(),
+                                    webkit2gtk::ffi::webkit_get_micro_version(),
+                                )
+                            };
                             if settings.find_property("enable-webrtc").is_some() {
                                 settings.set_property("enable-webrtc", true);
+                                let now: bool = settings.property("enable-webrtc");
+                                log::warn!(
+                                    "[webkit] WebKitGTK {major}.{minor}.{micro} — enable-webrtc set, reads back as {now}"
+                                );
+                            } else {
+                                log::warn!(
+                                    "[webkit] WebKitGTK {major}.{minor}.{micro} — no 'enable-webrtc' property (needs ≥ 2.38); RTSP will fall back to MJPEG"
+                                );
                             }
                         }
                         wv.connect_permission_request(|_wv, req| {

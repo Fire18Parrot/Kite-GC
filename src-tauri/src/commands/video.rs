@@ -63,6 +63,9 @@ pub async fn video_go2rtc_download(app_handle: AppHandle) -> Result<String, Stri
 /// Start (or refresh) the go2rtc RTSP→WebRTC stream for `url`. Ensures go2rtc is running and
 /// registers the source. The browser then negotiates WebRTC via `video_webrtc_offer`.
 ///
+/// `mjpeg`: the feed will be consumed as MJPEG over HTTP (the fallback for WebViews without WebRTC),
+/// which forces an ffmpeg transcode — see below.
+///
 /// `use_ffmpeg`: register the source via go2rtc's bundled-ffmpeg reader instead of its native RTSP
 /// client. The `input=rtsp/udp` template uses ffmpeg WITHOUT a forced `-rtsp_transport`, which is the
 /// only mode that reads quirky servers (e.g. obs-rtspserver, which 461s any forced transport). Used
@@ -71,10 +74,21 @@ pub async fn video_go2rtc_download(app_handle: AppHandle) -> Result<String, Stri
 pub async fn video_webrtc_start(
     url: String,
     use_ffmpeg: bool,
+    mjpeg: bool,
     engine: State<'_, Go2Rtc>,
 ) -> Result<(), String> {
     let port = engine.ensure_running()?;
-    let src = if use_ffmpeg {
+    // `mjpeg` = the consumer will be go2rtc's `/api/stream.mjpeg` endpoint, which can only serve a
+    // stream that actually carries an MJPEG track. An ordinary H.264 camera does not, so the source
+    // must be registered with `#video=mjpeg` — an ffmpeg TRANSCODE, not a copy. Without it the endpoint
+    // fails the moment the <img> requests it, which is exactly how the MJPEG fallback died on the Pi.
+    // The MJPEG path is committed to the ffmpeg reader either way, so it always takes the permissive
+    // `input=rtsp/udp` template (ffmpeg with NO forced -rtsp_transport) rather than honouring the
+    // transport choice: that is the only variant that also reads UDP-only servers, and a connection
+    // left on "Auto" would otherwise fail to open one at all.
+    let src = if mjpeg {
+        format!("ffmpeg:{url}#input=rtsp/udp#video=mjpeg")
+    } else if use_ffmpeg {
         format!("ffmpeg:{url}#input=rtsp/udp#video=copy")
     } else {
         url.clone()
