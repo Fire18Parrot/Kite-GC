@@ -94,6 +94,11 @@ sustain. Two things are worth knowing:
   brings its own browser engine and does not use the system's media packages at all. If video matters
   to you on Linux, prefer the **.deb / system installation** — it uses your distribution's engine and
   plugins, which you can at least influence.
+- **Hardware decoding is used automatically where it exists.** On boards whose chip can decode H.264
+  itself (Raspberry Pi 3 and 4 among them), Kite tests this once at startup and then lets the hardware
+  do the decoding half of the conversion. The log line `[ffmpeg] V4L2 hardware H.264 decoding: …` tells
+  you which way it went. A Raspberry Pi 5 has no such decoder — there everything is done on the CPU,
+  and no setting changes that.
 - **Send a smaller or slower stream from the source.** This is the one lever that really works, because
   it removes the work at *every* stage — network, decoding, conversion and display. On a single-board
   computer, 480p at 30 fps is comfortable where 720p60 is not. Set it where the stream is produced (your
