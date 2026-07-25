@@ -968,7 +968,10 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
         allowHwDecode: rtspMjpegFailures < 2,
       });
       const mjpegUrl = await buildMjpegUrl();
-      patch({ status: 'live', mjpegUrl, error: null, rtspEngine: 'native', reconnecting: false, reconnectAttempt: 0 });
+      // 'ffmpeg', always: an MJPEG source is registered as `ffmpeg:…#video=mjpeg` regardless of the
+      // transport, because go2rtc's native reader cannot transcode. Reporting 'native' here told the
+      // panel (and the tester) the opposite of what was running.
+      patch({ status: 'live', mjpegUrl, error: null, rtspEngine: 'ffmpeg', reconnecting: false, reconnectAttempt: 0 });
     } catch (e) {
       logVideo('warn', `RTSP (MJPEG fallback) failed: ${e instanceof Error ? e.message : String(e)}`);
       scheduleRtspReconnect();
