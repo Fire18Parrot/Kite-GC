@@ -139,6 +139,12 @@ export interface VideoState {
 // store): we remember the device/resolution/mirror selection and whether video
 // was running, so it can auto-start with the last settings on the next launch.
 const STORAGE_KEY = 'kite-gc-video';
+/** Crash canary for the opt-in MediaSource path: set when a negotiation attempt starts, cleared when
+ *  it succeeds or fails CLEANLY. If it is still present at the next launch, the attempt never finished
+ *  — on some engines (WebKitGTK 2.50/Pi, no usable H.264 decoder) building the MSE pipeline froze the
+ *  whole WebView instead of throwing, and with `enabled`+`rtspMse` persisted the auto-start would
+ *  re-freeze every launch: a soft-locked app. Seeing the canary disables the mode for the next run. */
+const MSE_ATTEMPT_KEY = 'kite-gc-video-mse-attempt';
 
 interface VideoPrefs {
   kind: VideoKind;
@@ -189,13 +195,25 @@ const PREF_DEFAULTS: VideoPrefs = {
 };
 
 function loadPrefs(): VideoPrefs {
+  // Safe mode: a surviving canary means the last MediaSource attempt froze the WebView (see
+  // MSE_ATTEMPT_KEY). Disable the mode AND persist that immediately — clearing only the canary would
+  // re-arm the freeze loop on the launch after next.
+  let mseSafeMode = false;
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage.getItem(MSE_ATTEMPT_KEY)) {
+      localStorage.removeItem(MSE_ATTEMPT_KEY);
+      mseSafeMode = true;
+    }
+  } catch {
+    /* ignore */
+  }
   try {
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null;
     if (raw) {
       const p = JSON.parse(raw) as Partial<VideoPrefs> & { v4l2Device?: string | null };
       // Pre-1.0 hard-switch: the old Linux-only 'v4l2' kind is now the generic 'native' kind.
       const kind = ((p.kind as string) === 'v4l2' ? 'native' : p.kind ?? 'camera') as VideoKind;
-      return {
+      const prefs: VideoPrefs = {
         ...PREF_DEFAULTS,
         ...p,
         kind,
@@ -213,6 +231,15 @@ function loadPrefs(): VideoPrefs {
         nativeHeight: p.nativeHeight ?? 720,
         nativeFps: p.nativeFps ?? 30,
       };
+      if (mseSafeMode && prefs.rtspMse) {
+        prefs.rtspMse = false;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+        logVideo(
+          'warn',
+          'Low-CPU mode (MediaSource) disabled: the previous attempt never completed — the engine most likely froze. Re-enable manually to try again.',
+        );
+      }
+      return prefs;
     }
   } catch {
     /* ignore */
@@ -935,6 +962,13 @@ export function isMseAvailable(): boolean {
 }
 
 function closeMse(): void {
+  // Reached = the attempt ended in a controlled way (success → later stop, or a clean throw handled
+  // by the caller) — the crash canary only has to survive an actual WebView freeze.
+  try {
+    localStorage.removeItem(MSE_ATTEMPT_KEY);
+  } catch {
+    /* ignore */
+  }
   if (mseSocket) {
     const ws = mseSocket;
     mseSocket = null;
@@ -963,6 +997,25 @@ function closeMse(): void {
 /** Play the source through MediaSource. Resolves once segments are flowing into the shared stream;
  *  throws if this engine cannot do it, in which case the caller falls back to the ordinary chain. */
 async function negotiateMse(url: string, transport: RtspTransport): Promise<void> {
+  // Gate hard BEFORE touching MediaSource. On WebKitGTK 2.50 (Pi AppImage, `h264 decoders=[]`)
+  // building the MSE pipeline froze the entire WebView instead of throwing — so everything knowable
+  // up front is checked up front, and the crash canary turns a freeze into a one-restart recovery.
+  const managed = (globalThis as { ManagedMediaSource?: typeof MediaSource }).ManagedMediaSource;
+  const Source = managed ?? MediaSource;
+  const codecs = MSE_CODECS.filter((c) => Source.isTypeSupported(`video/mp4; codecs="${c}"`)).join();
+  if (!codecs) {
+    throw new Error('engine reports no MSE-playable H.264/H.265 codec (GStreamer decoder missing?)');
+  }
+  const probe = document.createElement('video') as HTMLVideoElement & { captureStream?: () => MediaStream };
+  if (typeof probe.captureStream !== 'function') {
+    throw new Error('captureStream is unavailable — an MSE stream cannot be shared across the video surfaces');
+  }
+  try {
+    localStorage.setItem(MSE_ATTEMPT_KEY, '1'); // cleared by closeMse() / on success
+  } catch {
+    /* ignore */
+  }
+
   // Register the source normally — no MJPEG transcode; go2rtc muxes the original H.264 into fMP4.
   await invoke('video_webrtc_start', { url, useFfmpeg: transport === 'udp', mjpeg: false });
   const port = await invoke<number | null>('video_go2rtc_port');
@@ -975,8 +1028,6 @@ async function negotiateMse(url: string, transport: RtspTransport): Promise<void
   el.playsInline = true;
   mseEl = el;
 
-  const managed = (globalThis as { ManagedMediaSource?: typeof MediaSource }).ManagedMediaSource;
-  const Source = managed ?? MediaSource;
   const ms = new Source();
   if (managed) {
     (el as HTMLVideoElement & { disableRemotePlayback?: boolean }).disableRemotePlayback = true;
@@ -995,7 +1046,6 @@ async function negotiateMse(url: string, transport: RtspTransport): Promise<void
     ms.addEventListener(
       'sourceopen',
       () => {
-        const codecs = MSE_CODECS.filter((c) => Source.isTypeSupported(`video/mp4; codecs="${c}"`)).join();
         ws.send(JSON.stringify({ type: 'mse', value: codecs }));
       },
       { once: true },
@@ -1008,7 +1058,16 @@ async function negotiateMse(url: string, transport: RtspTransport): Promise<void
       const msg = JSON.parse(ev.data) as { type?: string; value?: string };
       if (msg.type !== 'mse' || !msg.value) return;
 
-      const sb = ms.addSourceBuffer(msg.value);
+      // Reject instead of letting a throw here strand the negotiation until the 10 s timeout —
+      // go2rtc may answer with a codec string the engine cannot actually buffer.
+      let sb: SourceBuffer;
+      try {
+        sb = ms.addSourceBuffer(msg.value);
+      } catch (e) {
+        clearTimeout(timer);
+        reject(e instanceof Error ? e : new Error(String(e)));
+        return;
+      }
       sb.mode = 'segments';
       // Segments arriving while the buffer is busy queue here and are flushed on `updateend`.
       let pending: Uint8Array[] = [];
@@ -1062,13 +1121,17 @@ async function negotiateMse(url: string, transport: RtspTransport): Promise<void
 
   await el.play().catch(() => {});
 
-  // Publish to every sink. Without captureStream the element could only be shown in one place, so
-  // rather than half-supporting the mode we let the caller fall back to the ordinary chain.
+  // Publish to every sink (captureStream presence was verified up front; re-checked as a safety net).
   const capture = (el as HTMLVideoElement & { captureStream?: () => MediaStream }).captureStream;
   if (typeof capture !== 'function') {
     throw new Error('captureStream is unavailable — an MSE stream cannot be shared across the video surfaces');
   }
   videoStream.set(capture.call(el));
+  try {
+    localStorage.removeItem(MSE_ATTEMPT_KEY); // attempt completed — don't false-trip safe mode later
+  } catch {
+    /* ignore */
+  }
   patch({ status: 'live', error: null, rtspEngine: 'native' });
 }
 
