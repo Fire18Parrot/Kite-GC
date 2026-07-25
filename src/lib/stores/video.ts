@@ -296,6 +296,19 @@ function patch(p: Partial<VideoState>): void {
   videoState.update((s) => ({ ...s, ...p }));
 }
 
+/** Mirror a video-pipeline event into the **backend log file** (and the console).
+ *
+ *  The whole source router — including the RTSP reconnect loop and its stall detection — runs here in
+ *  the frontend, so until now the answer to "why did the stream drop?" existed only as a `console.warn`
+ *  in DevTools. A tester on a Raspberry Pi has neither: a release build has no console, and the log file
+ *  the Diagnostics page hands out never saw a word of it. Stream aborts go in at **warn**, so they show
+ *  up at the default log level; routine lifecycle detail is `info` (captured at Debug). */
+function logVideo(level: 'warn' | 'info', message: string): void {
+  if (level === 'warn') console.warn(`[video] ${message}`);
+  else console.log(`[video] ${message}`);
+  void invoke('log_frontend', { level, area: 'video', message }).catch(() => {});
+}
+
 /** Bind a sink's `<video>` element to the shared MediaStream (camera or rtsp). */
 export function bindVideoEl(el: HTMLVideoElement | null, stream: MediaStream | null): void {
   if (!el) return;
@@ -636,7 +649,10 @@ async function negotiateWebrtc(url: string, useFfmpeg: boolean): Promise<void> {
   };
   pc.onconnectionstatechange = () => {
     // A genuine drop (failed) enters the infinite reconnect loop; 'closed' is our own teardown.
-    if (rtcConn === pc && pc.connectionState === 'failed') scheduleRtspReconnect();
+    if (rtcConn === pc && pc.connectionState === 'failed') {
+      logVideo('warn', 'WebRTC peer connection failed');
+      scheduleRtspReconnect();
+    }
   };
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -679,24 +695,50 @@ function startRtspStallMonitor(pc: RTCPeerConnection): void {
   let last = -1;
   let sawFrames = false;
   let lastChange = performance.now();
+  let warnedNoReport = false;
   rtspMonitor = setInterval(() => {
     if (rtcConn !== pc) { if (rtspMonitor) { clearInterval(rtspMonitor); rtspMonitor = undefined; } return; }
     void pc.getStats().then((stats) => {
       if (rtcConn !== pc) return;
-      let progress = 0;
+      let frames = 0;
+      let bytes = 0;
+      let sawReport = false;
       stats.forEach((report) => {
-        if (report.type === 'inbound-rtp') {
-          const rr = report as RTCInboundRtpStreamStats;
-          if (rr.kind === 'video') progress = rr.framesReceived ?? rr.bytesReceived ?? 0;
-        }
+        if (report.type !== 'inbound-rtp') return;
+        // WebKit has historically reported the legacy `mediaType` instead of the spec's `kind`, and a
+        // report carrying neither is counted too: mistaking a healthy feed for a dead one would put the
+        // stream into a permanent reconnect loop, which is far worse than a missed stall.
+        const rr = report as RTCInboundRtpStreamStats & { mediaType?: string };
+        const kind = rr.kind ?? rr.mediaType;
+        if (kind && kind !== 'video') return;
+        sawReport = true;
+        frames += rr.framesReceived ?? 0;
+        bytes += rr.bytesReceived ?? 0;
       });
+      if (!sawReport) {
+        // No inbound stats at all — we cannot measure, so we must not judge. Say so once.
+        if (!warnedNoReport) {
+          warnedNoReport = true;
+          logVideo('warn', 'RTSP stall monitor: no inbound-rtp stats from this WebView — stall detection is inactive');
+        }
+        return;
+      }
+      const progress = frames || bytes;
       const now = performance.now();
       if (progress !== last) {
         if (last >= 0 && progress > last) sawFrames = true; // real advance, not the initial read
         last = progress;
         lastChange = now;
       } else if (now - lastChange > (sawFrames ? RTSP_STALL_LIVE_MS : RTSP_STALL_CONNECT_MS)) {
-        console.warn(`[video] RTSP stalled (${sawFrames ? 'live feed silent' : 'no first frame'}) — reconnecting`);
+        // The frames/bytes pair is the diagnosis: bytes > 0 with frames == 0 means the media arrives
+        // but nothing decodes it (a missing H.264 decoder in the WebView's GStreamer stack); bytes == 0
+        // means nothing arrives at all (transport / source).
+        logVideo(
+          'warn',
+          `RTSP stalled after ${((now - lastChange) / 1000).toFixed(1)}s ` +
+            `(${sawFrames ? 'live feed went silent' : 'no first frame'}; ` +
+            `framesReceived=${frames} bytesReceived=${bytes}) — reconnecting`,
+        );
         scheduleRtspReconnect();
       }
     }).catch(() => {});
@@ -708,6 +750,12 @@ function startRtspStallMonitor(pc: RTCPeerConnection): void {
 function scheduleRtspReconnect(): void {
   const st = get(videoState);
   if (st.kind !== 'rtsp' || !st.enabled) return; // user stopped → do not reconnect
+  // The loop is unbounded by design, so logging every attempt would fill the file on a source that
+  // never comes back. Log the first few, then every tenth — enough to see it is still going.
+  const attempt = st.reconnectAttempt + 1;
+  if (attempt <= 3 || attempt % 10 === 0) {
+    logVideo('warn', `RTSP reconnect attempt ${attempt} (${st.rtspUrl}, transport=${st.rtspTransport})`);
+  }
   clearRtspTimers();
   closeRtc();
   videoStream.set(null);
@@ -732,7 +780,7 @@ async function negotiateRtsp(url: string, transport: RtspTransport): Promise<voi
     try {
       await negotiateWebrtc(url, false); // native go2rtc RTSP client
     } catch (nativeErr) {
-      console.warn('[video] native go2rtc RTSP failed, retrying via ffmpeg', nativeErr);
+      logVideo('warn', `native go2rtc RTSP reader failed, retrying via ffmpeg: ${nativeErr instanceof Error ? nativeErr.message : String(nativeErr)}`);
       closeRtc();
       if (get(videoState).kind !== 'rtsp' || !get(videoState).enabled) return; // stopped meanwhile
       await negotiateWebrtc(url, true); // ffmpeg reader fallback
@@ -765,17 +813,38 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
   });
   if (!reconnect) savePrefs();
 
+  if (!reconnect) {
+    // A missing engine cannot be fixed by retrying, so it must not enter the loop: before this, an
+    // auto-start without go2rtc installed produced an endless "Reconnecting… (n)" with no explanation
+    // (seen on the Pi). Checked once per fresh start — a reconnect attempt inherits the verdict.
+    const engine = await invoke<string | null>('video_go2rtc_status').catch(() => null);
+    if (!engine) {
+      logVideo('warn', 'RTSP start aborted: the go2rtc engine is not installed');
+      patch({ status: 'error', error: get(t)('video.engineMissing'), reconnecting: false, reconnectAttempt: 0 });
+      return;
+    }
+    logVideo(
+      'info',
+      `RTSP start ${url} (transport=${transport}, webrtc=${isWebrtcAvailable()}, engine=${engine})`,
+    );
+  }
+
   // MJPEG fallback for webviews without RTCPeerConnection (rare in Tauri). Reader choice: keep the
   // native go2rtc client for auto/tcp (the pre-connection-list behaviour — works without ffmpeg);
   // only an explicit UDP selection routes through the ffmpeg reader (needs ffmpeg, like the normal
   // UDP path).
   if (!isWebrtcAvailable()) {
+    // Degraded mode, and a silent one: it needs go2rtc to transcode to MJPEG and a WebView that renders
+    // multipart images. Worth a warning every time, not just a console line.
+    if (!reconnect) {
+      logVideo('warn', 'WebRTC is unavailable in this WebView — falling back to the MJPEG image path');
+    }
     try {
       await invoke('video_webrtc_start', { url, useFfmpeg: transport === 'udp' });
       const mjpegUrl = await buildMjpegUrl();
       patch({ status: 'live', mjpegUrl, error: null, rtspEngine: 'native', reconnecting: false, reconnectAttempt: 0 });
     } catch (e) {
-      console.warn('[video] RTSP (mjpeg) failed — reconnecting', e);
+      logVideo('warn', `RTSP (MJPEG fallback) failed: ${e instanceof Error ? e.message : String(e)}`);
       scheduleRtspReconnect();
     }
     return;
@@ -795,7 +864,7 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
     patch({ reconnecting: false, reconnectAttempt: 0 });
     if (rtcConn) startRtspStallMonitor(rtcConn);
   } catch (err) {
-    console.warn('[video] RTSP connect failed — reconnecting', err);
+    logVideo('warn', `RTSP connect failed: ${err instanceof Error ? err.message : String(err)}`);
     scheduleRtspReconnect();
   }
 }
@@ -810,11 +879,11 @@ export function reportMjpegError(): void {
   const st = get(videoState);
   if (!st.enabled || !st.mjpegUrl) return;
   if (st.kind === 'rtsp') {
-    console.warn('[video] MJPEG image failed to load — reconnecting');
+    logVideo('warn', `MJPEG image failed to load (${st.mjpegUrl}) — reconnecting`);
     scheduleRtspReconnect();
     return;
   }
-  console.warn('[video] MJPEG image failed to load');
+  logVideo('warn', `MJPEG image failed to load (${st.mjpegUrl})`);
   patch({ status: 'error', mjpegUrl: null, error: get(t)('video.mjpegLoadFailed') });
 }
 

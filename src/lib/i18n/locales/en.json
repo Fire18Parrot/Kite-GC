@@ -846,6 +846,7 @@
     "logDebug": "Debug (verbose)",
     "logFolder": "Log File",
     "openLogFolder": "Open Folder",
+    "logUnavailable": "No log file — logging could not be initialized.",
     "updates": "Updates",
     "updateCheck": "Check for updates",
     "updateDisabled": "Disabled",

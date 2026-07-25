@@ -293,11 +293,19 @@ impl Go2Rtc {
 
         let mut child = cmd.spawn().map_err(|e| format!("Cannot start go2rtc: {e}"))?;
         // Drain stderr to the terminal for diagnostics.
+        // Drain go2rtc's stderr into OUR log file. It runs at its own `warn` level, so these lines are
+        // the engine's account of why a source failed (RTSP connect refused, codec mismatch, a reader
+        // dying) — the single most useful thing when a stream won't come up. Until now they only went
+        // to `eprintln!`, i.e. nowhere a tester could reach: a release build has no console, and the log
+        // file the Diagnostics page hands out never saw them.
         if let Some(err) = child.stderr.take() {
             std::thread::spawn(move || {
                 let reader = std::io::BufReader::new(err);
                 for line in reader.lines().map_while(Result::ok) {
-                    eprintln!("go2rtc: {line}");
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        log::warn!("[video][go2rtc] {line}");
+                    }
                 }
             });
         }

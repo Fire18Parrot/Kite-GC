@@ -73,7 +73,7 @@ use commands::video::{
     video_native_mjpeg_start, video_native_mjpeg_stop,
 };
 use video::{Go2Rtc, MjpegServer};
-use commands::logging::{set_log_level, get_log_path, log_session_settings};
+use commands::logging::{set_log_level, get_log_path, log_session_settings, log_frontend};
 use commands::tiles::fetch_tile;
 use commands::radar::{radar_configure, radar_set_center, radar_set_node_pos, radar_snapshot};
 use commands::terrain::{
@@ -106,6 +106,13 @@ use telemetry_forward::{relay_configure, relay_clear, RelayHub};
 /// True when a `.portable` marker file sits next to the executable. Used both to
 /// redirect data (`setup_portable_mode`) and to gate plugins whose storage path we
 /// cannot redirect in portable mode (e.g. window-state on Windows).
+pub fn is_portable() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join(".portable").exists()))
+        .unwrap_or(false)
+}
+
 /// Raspberry Pi workaround: force the WebKit framebuffer to be reallocated shortly after start-up.
 ///
 /// With GPU acceleration enabled, the Pi's **first** framebuffer allocation is usually broken — the
@@ -141,13 +148,6 @@ fn nudge_framebuffer_on_pi(app: &tauri::App) {
         let _ = window.set_size(size);
         log::info!("[gpu] Raspberry Pi framebuffer nudge applied ({}x{})", size.width, size.height);
     });
-}
-
-pub fn is_portable() -> bool {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.join(".portable").exists()))
-        .unwrap_or(false)
 }
 
 /// Detect portable mode: if a `.portable` marker file exists next to the
@@ -327,6 +327,7 @@ pub fn run() {
             set_log_level,
             get_log_path,
             log_session_settings,
+            log_frontend,
             fetch_tile,
             mission_get,
             mission_clear,
