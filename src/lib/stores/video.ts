@@ -87,14 +87,6 @@ export interface VideoState {
   rtspTransport: RtspTransport;
   /** Saved, named RTSP connections the user can recall (explicit save — never auto-added). */
   rtspConnections: RtspConnection[];
-  /** Opt-in: play RTSP through MediaSource (fMP4) instead of WebRTC/MJPEG. A host-level choice, not a
-   *  per-connection one — it exists for machines whose WebView can't do WebRTC and whose CPU can't
-   *  afford the MJPEG transcode. Trades latency for load; see `negotiateMse`. */
-  rtspMse: boolean;
-  /** Downscale the MJPEG-fallback transcode to this width (0 = original size). Host-level like
-   *  `rtspMse`: the fallback is CPU-decoded at both ends, so a small host driving a small window
-   *  pays full-source-size prices for nothing. Only the MJPEG path uses it — WebRTC never re-encodes. */
-  rtspMaxWidth: number;
   /** Active RTSP reader once live (native go2rtc client vs ffmpeg fallback); runtime-only. */
   rtspEngine: RtspEngine;
   /** Runtime-only: true while the infinite RTSP auto-reconnect loop is running (link dropped/stalled). */
@@ -139,12 +131,6 @@ export interface VideoState {
 // store): we remember the device/resolution/mirror selection and whether video
 // was running, so it can auto-start with the last settings on the next launch.
 const STORAGE_KEY = 'kite-gc-video';
-/** Crash canary for the opt-in MediaSource path: set when a negotiation attempt starts, cleared when
- *  it succeeds or fails CLEANLY. If it is still present at the next launch, the attempt never finished
- *  — on some engines (WebKitGTK 2.50/Pi, no usable H.264 decoder) building the MSE pipeline froze the
- *  whole WebView instead of throwing, and with `enabled`+`rtspMse` persisted the auto-start would
- *  re-freeze every launch: a soft-locked app. Seeing the canary disables the mode for the next run. */
-const MSE_ATTEMPT_KEY = 'kite-gc-video-mse-attempt';
 
 interface VideoPrefs {
   kind: VideoKind;
@@ -155,8 +141,6 @@ interface VideoPrefs {
   rtspUrl: string;
   rtspTransport: RtspTransport;
   rtspConnections: RtspConnection[];
-  rtspMse: boolean;
-  rtspMaxWidth: number;
   nativeDevice: string | null;
   nativeDeviceName: string | null;
   nativeWidth: number;
@@ -179,8 +163,6 @@ const PREF_DEFAULTS: VideoPrefs = {
   rtspUrl: '',
   rtspTransport: 'auto',
   rtspConnections: [],
-  rtspMse: false,
-  rtspMaxWidth: 0,
   nativeDevice: null,
   nativeDeviceName: null,
   nativeWidth: 1280,
@@ -195,25 +177,13 @@ const PREF_DEFAULTS: VideoPrefs = {
 };
 
 function loadPrefs(): VideoPrefs {
-  // Safe mode: a surviving canary means the last MediaSource attempt froze the WebView (see
-  // MSE_ATTEMPT_KEY). Disable the mode AND persist that immediately — clearing only the canary would
-  // re-arm the freeze loop on the launch after next.
-  let mseSafeMode = false;
-  try {
-    if (typeof localStorage !== 'undefined' && localStorage.getItem(MSE_ATTEMPT_KEY)) {
-      localStorage.removeItem(MSE_ATTEMPT_KEY);
-      mseSafeMode = true;
-    }
-  } catch {
-    /* ignore */
-  }
   try {
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null;
     if (raw) {
       const p = JSON.parse(raw) as Partial<VideoPrefs> & { v4l2Device?: string | null };
       // Pre-1.0 hard-switch: the old Linux-only 'v4l2' kind is now the generic 'native' kind.
       const kind = ((p.kind as string) === 'v4l2' ? 'native' : p.kind ?? 'camera') as VideoKind;
-      const prefs: VideoPrefs = {
+      return {
         ...PREF_DEFAULTS,
         ...p,
         kind,
@@ -223,23 +193,12 @@ function loadPrefs(): VideoPrefs {
         rtspUrl: p.rtspUrl ?? '',
         rtspTransport: p.rtspTransport ?? 'auto',
         rtspConnections: Array.isArray(p.rtspConnections) ? p.rtspConnections : [],
-        rtspMse: p.rtspMse ?? false,
-        rtspMaxWidth: p.rtspMaxWidth ?? 0,
         nativeDevice: p.nativeDevice ?? p.v4l2Device ?? null,
         nativeDeviceName: p.nativeDeviceName ?? null,
         nativeWidth: p.nativeWidth ?? 1280,
         nativeHeight: p.nativeHeight ?? 720,
         nativeFps: p.nativeFps ?? 30,
       };
-      if (mseSafeMode && prefs.rtspMse) {
-        prefs.rtspMse = false;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
-        logVideo(
-          'warn',
-          'Low-CPU mode (MediaSource) disabled: the previous attempt never completed — the engine most likely froze. Re-enable manually to try again.',
-        );
-      }
-      return prefs;
     }
   } catch {
     /* ignore */
@@ -262,8 +221,6 @@ function savePrefs(): void {
         rtspUrl: s.rtspUrl,
         rtspTransport: s.rtspTransport,
         rtspConnections: s.rtspConnections,
-        rtspMse: s.rtspMse,
-        rtspMaxWidth: s.rtspMaxWidth,
         nativeDevice: s.nativeDevice,
         nativeDeviceName: s.nativeDeviceName,
         nativeWidth: s.nativeSel.width,
@@ -304,8 +261,6 @@ const INITIAL: VideoState = {
   rtspUrl: boot.rtspUrl,
   rtspTransport: boot.rtspTransport,
   rtspConnections: boot.rtspConnections,
-  rtspMse: boot.rtspMse,
-  rtspMaxWidth: boot.rtspMaxWidth,
   rtspEngine: null,
   reconnecting: false,
   reconnectAttempt: 0,
@@ -619,7 +574,6 @@ function stopTracks(): void {
   if (s) for (const tr of s.getTracks()) tr.stop();
   videoStream.set(null);
   closeRtc();
-  closeMse();
 }
 
 // ── RTSP via WebRTC (go2rtc) ─────────────────────────────────────────
@@ -936,205 +890,6 @@ async function negotiateRtsp(url: string, transport: RtspTransport): Promise<voi
   }
 }
 
-// ── RTSP via MediaSource (opt-in, for hosts without WebRTC) ──────────────────────────────────────
-// A third way to get the SAME H.264 stream into the WebView's own decoder, for machines where WebRTC
-// isn't available and the MJPEG fallback's transcode is too expensive (a Raspberry Pi 5 spends ~55 % of
-// four cores on 480p60 that way, and cannot hold 720p60 at all). go2rtc republishes the source as fMP4
-// over a WebSocket; we feed those segments to a MediaSource and the engine decodes H.264 directly — no
-// ffmpeg, no JPEG round-trip.
-//
-// The cost is latency, and it is not small: a <video> element plays from a buffer and deliberately runs
-// behind the live edge. go2rtc's own client settles at roughly a second, and we keep its proven pacing
-// rather than inventing our own — this mode is offered as an explicit trade, never as the default.
-
-/** Codec strings offered to go2rtc, filtered by what this engine reports it can play. Same list go2rtc's
- *  own client uses; video only, since Kite never plays stream audio. */
-const MSE_CODECS = ['avc1.640029', 'avc1.64002A', 'avc1.640033', 'hvc1.1.6.L153.B0'];
-/** Keep at most this many seconds buffered; older data is dropped so memory and seek range stay bounded. */
-const MSE_BUFFER_SECONDS = 5;
-
-let mseSocket: WebSocket | null = null;
-let mseEl: HTMLVideoElement | null = null;
-
-/** True when this WebView can play fMP4 through MediaSource at all. */
-export function isMseAvailable(): boolean {
-  return typeof MediaSource !== 'undefined' || 'ManagedMediaSource' in globalThis;
-}
-
-function closeMse(): void {
-  // Reached = the attempt ended in a controlled way (success → later stop, or a clean throw handled
-  // by the caller) — the crash canary only has to survive an actual WebView freeze.
-  try {
-    localStorage.removeItem(MSE_ATTEMPT_KEY);
-  } catch {
-    /* ignore */
-  }
-  if (mseSocket) {
-    const ws = mseSocket;
-    mseSocket = null;
-    try {
-      ws.onclose = null;
-      ws.close();
-    } catch {
-      /* ignore */
-    }
-  }
-  if (mseEl) {
-    const el = mseEl;
-    mseEl = null;
-    try {
-      el.pause();
-      if (el.src) URL.revokeObjectURL(el.src);
-      el.removeAttribute('src');
-      el.srcObject = null;
-      el.load();
-    } catch {
-      /* ignore */
-    }
-  }
-}
-
-/** Play the source through MediaSource. Resolves once segments are flowing into the shared stream;
- *  throws if this engine cannot do it, in which case the caller falls back to the ordinary chain. */
-async function negotiateMse(url: string, transport: RtspTransport): Promise<void> {
-  // Gate hard BEFORE touching MediaSource. On WebKitGTK 2.50 (Pi AppImage, `h264 decoders=[]`)
-  // building the MSE pipeline froze the entire WebView instead of throwing — so everything knowable
-  // up front is checked up front, and the crash canary turns a freeze into a one-restart recovery.
-  const managed = (globalThis as { ManagedMediaSource?: typeof MediaSource }).ManagedMediaSource;
-  const Source = managed ?? MediaSource;
-  const codecs = MSE_CODECS.filter((c) => Source.isTypeSupported(`video/mp4; codecs="${c}"`)).join();
-  if (!codecs) {
-    throw new Error('engine reports no MSE-playable H.264/H.265 codec (GStreamer decoder missing?)');
-  }
-  const probe = document.createElement('video') as HTMLVideoElement & { captureStream?: () => MediaStream };
-  if (typeof probe.captureStream !== 'function') {
-    throw new Error('captureStream is unavailable — an MSE stream cannot be shared across the video surfaces');
-  }
-  try {
-    localStorage.setItem(MSE_ATTEMPT_KEY, '1'); // cleared by closeMse() / on success
-  } catch {
-    /* ignore */
-  }
-
-  // Register the source normally — no MJPEG transcode; go2rtc muxes the original H.264 into fMP4.
-  await invoke('video_webrtc_start', { url, useFfmpeg: transport === 'udp', mjpeg: false });
-  const port = await invoke<number | null>('video_go2rtc_port');
-  if (!port) throw new Error('go2rtc is not running');
-
-  // A driver element the user never sees: a MediaSource attaches to exactly one element, while Kite's
-  // sinks all share a single MediaStream — so this element plays and `captureStream()` publishes it.
-  const el = document.createElement('video');
-  el.muted = true;
-  el.playsInline = true;
-  mseEl = el;
-
-  const ms = new Source();
-  if (managed) {
-    (el as HTMLVideoElement & { disableRemotePlayback?: boolean }).disableRemotePlayback = true;
-    el.srcObject = ms as unknown as MediaProvider;
-  } else {
-    el.src = URL.createObjectURL(ms);
-  }
-
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/api/ws?src=kite`);
-  ws.binaryType = 'arraybuffer';
-  mseSocket = ws;
-
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('MSE negotiation timeout')), 10_000);
-
-    ms.addEventListener(
-      'sourceopen',
-      () => {
-        ws.send(JSON.stringify({ type: 'mse', value: codecs }));
-      },
-      { once: true },
-    );
-
-    ws.onerror = () => reject(new Error('MSE WebSocket error'));
-    ws.onclose = () => reject(new Error('MSE WebSocket closed'));
-    ws.onmessage = (ev) => {
-      if (typeof ev.data !== 'string') return;
-      const msg = JSON.parse(ev.data) as { type?: string; value?: string };
-      if (msg.type !== 'mse' || !msg.value) return;
-
-      // Reject instead of letting a throw here strand the negotiation until the 10 s timeout —
-      // go2rtc may answer with a codec string the engine cannot actually buffer.
-      let sb: SourceBuffer;
-      try {
-        sb = ms.addSourceBuffer(msg.value);
-      } catch (e) {
-        clearTimeout(timer);
-        reject(e instanceof Error ? e : new Error(String(e)));
-        return;
-      }
-      sb.mode = 'segments';
-      // Segments arriving while the buffer is busy queue here and are flushed on `updateend`.
-      let pending: Uint8Array[] = [];
-
-      sb.addEventListener('updateend', () => {
-        if (!sb.updating && pending.length) {
-          const chunk = pending.shift();
-          try {
-            if (chunk) sb.appendBuffer(chunk);
-          } catch {
-            pending = [];
-          }
-          return;
-        }
-        if (sb.updating || !sb.buffered.length) return;
-        // Drop everything older than the window, then chase the live edge by playing faster the further
-        // behind we are — go2rtc's own pacing, which settles at roughly a second of lag.
-        const end = sb.buffered.end(sb.buffered.length - 1);
-        const keepFrom = end - MSE_BUFFER_SECONDS;
-        const start0 = sb.buffered.start(0);
-        if (keepFrom > start0) {
-          try {
-            sb.remove(start0, keepFrom);
-            ms.setLiveSeekableRange(keepFrom, end);
-          } catch {
-            /* ignore */
-          }
-        }
-        if (el.currentTime < keepFrom) el.currentTime = keepFrom;
-        const gap = end - el.currentTime;
-        el.playbackRate = gap > 0.1 ? gap : 0.1;
-      });
-
-      ws.onmessage = (data) => {
-        if (typeof data.data === 'string') return;
-        const bytes = new Uint8Array(data.data as ArrayBuffer);
-        if (sb.updating || pending.length) pending.push(bytes);
-        else {
-          try {
-            sb.appendBuffer(bytes);
-          } catch {
-            /* ignore — the updateend handler drains the queue */
-          }
-        }
-      };
-
-      clearTimeout(timer);
-      resolve();
-    };
-  });
-
-  await el.play().catch(() => {});
-
-  // Publish to every sink (captureStream presence was verified up front; re-checked as a safety net).
-  const capture = (el as HTMLVideoElement & { captureStream?: () => MediaStream }).captureStream;
-  if (typeof capture !== 'function') {
-    throw new Error('captureStream is unavailable — an MSE stream cannot be shared across the video surfaces');
-  }
-  videoStream.set(capture.call(el));
-  try {
-    localStorage.removeItem(MSE_ATTEMPT_KEY); // attempt completed — don't false-trip safe mode later
-  } catch {
-    /* ignore */
-  }
-  patch({ status: 'live', error: null, rtspEngine: 'native' });
-}
-
 /** Open (or re-open) the RTSP feed via go2rtc, honouring the active transport. Once live, a stall
  *  monitor watches for frame timeouts; any failure/drop enters the infinite reconnect loop (until
  *  frames return or the user stops). `reconnect` distinguishes a loop retry from a fresh start. */
@@ -1176,20 +931,6 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
     );
   }
 
-  // Opt-in MediaSource path: on this machine the user has traded latency for CPU load.
-  if (isLinux && st.rtspMse && isMseAvailable()) {
-    try {
-      await negotiateMse(url, transport);
-      if (get(videoState).kind !== 'rtsp' || !get(videoState).enabled) return; // stopped meanwhile
-      patch({ reconnecting: false, reconnectAttempt: 0 });
-      logVideo('info', 'RTSP playing through MediaSource (fMP4)');
-      return;
-    } catch (e) {
-      logVideo('warn', `MediaSource path failed, falling back: ${e instanceof Error ? e.message : String(e)}`);
-      closeMse();
-    }
-  }
-
   // MJPEG fallback for webviews without RTCPeerConnection (rare in Tauri). Reader choice: keep the
   // native go2rtc client for auto/tcp (the pre-connection-list behaviour — works without ffmpeg);
   // only an explicit UDP selection routes through the ffmpeg reader (needs ffmpeg, like the normal
@@ -1209,12 +950,7 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
       return;
     }
     try {
-      await invoke('video_webrtc_start', {
-        url,
-        useFfmpeg: transport === 'udp',
-        mjpeg: true,
-        maxWidth: st.rtspMaxWidth > 0 ? st.rtspMaxWidth : null,
-      });
+      await invoke('video_webrtc_start', { url, useFfmpeg: transport === 'udp', mjpeg: true });
       const mjpegUrl = await buildMjpegUrl();
       patch({ status: 'live', mjpegUrl, error: null, rtspEngine: 'native', reconnecting: false, reconnectAttempt: 0 });
     } catch (e) {
@@ -1375,23 +1111,6 @@ export function setRtspUrl(rtspUrl: string): void {
 /** Set the active RTSP transport (udp/tcp/auto); restart if currently on a live RTSP feed. */
 export async function setRtspTransport(transport: RtspTransport): Promise<void> {
   patch({ rtspTransport: transport });
-  savePrefs();
-  const st = get(videoState);
-  if (st.enabled && st.kind === 'rtsp') await startRtsp();
-}
-
-/** Toggle the MediaSource path; restarts a live RTSP feed so the change takes effect immediately. */
-export async function setRtspMse(rtspMse: boolean): Promise<void> {
-  patch({ rtspMse });
-  savePrefs();
-  const st = get(videoState);
-  if (st.enabled && st.kind === 'rtsp') await startRtsp();
-}
-
-/** Set the MJPEG-fallback transcode width cap (0 = original); restarts a live RTSP feed so the
- *  re-registered go2rtc source takes effect immediately. */
-export async function setRtspMaxWidth(rtspMaxWidth: number): Promise<void> {
-  patch({ rtspMaxWidth });
   savePrefs();
   const st = get(videoState);
   if (st.enabled && st.kind === 'rtsp') await startRtsp();
@@ -1591,11 +1310,14 @@ export async function enterPiP(): Promise<void> {
 /** Delay before auto-starting the Linux `camera` source, so the UI paints first (see `initVideo`). */
 const LINUX_CAMERA_AUTOSTART_DELAY_MS = 1200;
 
-/** One-time record of what this WebView can actually play. Which of these constructors exist decides
- *  the entire video strategy — WebRTC means H.264 straight to the decoder, MediaSource means the same
- *  decoder with a playback buffer in front, neither means the expensive MJPEG transcode — and on Linux
- *  it varies by distro and build in ways nothing else reveals. `webkitRTCPeerConnection` is checked too
- *  so a merely *prefixed* implementation can't masquerade as "no WebRTC at all". */
+/** One-time record of what this WebView can actually play. WebRTC decides the entire video strategy —
+ *  with it, H.264 goes straight to the decoder; without it, the expensive MJPEG transcode is the only
+ *  way — and on Linux that varies by distro and build in ways nothing else reveals.
+ *  `webkitRTCPeerConnection` is checked too, so a merely *prefixed* implementation can't masquerade as
+ *  "no WebRTC at all". MediaSource/captureStream are logged because they were the third candidate path
+ *  (fMP4 into the WebView's own decoder): WebKitGTK has MediaSource but **no** `captureStream`, so an
+ *  MSE-driven element cannot be published to Kite's shared multi-sink stream — that is why the path was
+ *  built, measured to never once engage on a Pi, and removed again. */
 function logWebViewMediaSupport(): void {
   const has = (name: string) => name in globalThis;
   logVideo(

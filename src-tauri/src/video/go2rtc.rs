@@ -65,6 +65,7 @@ pub fn status() -> Option<String> {
     let bin = find_go2rtc()?;
     let mut cmd = Command::new(&bin);
     cmd.arg("--version");
+    crate::child_env::sanitize(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -284,6 +285,8 @@ impl Go2Rtc {
 
         let mut cmd = Command::new(&bin);
         cmd.arg("-config").arg(&cfg_path);
+        // go2rtc spawns ffmpeg itself, so a poisoned environment here breaks the readers too.
+        crate::child_env::sanitize(&mut cmd);
         cmd.stdout(Stdio::null()).stderr(Stdio::piped()).stdin(Stdio::null());
         #[cfg(windows)]
         {

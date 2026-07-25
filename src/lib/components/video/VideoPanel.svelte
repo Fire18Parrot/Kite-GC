@@ -30,8 +30,6 @@
     updateRtspConnection,
     removeRtspConnection,
     selectRtspConnection,
-    setRtspMse,
-    setRtspMaxWidth,
     reportMjpegError,
     type RtspTransport,
     toggleFloating,
@@ -495,34 +493,6 @@
         </div>
       {/if}
 
-      <!-- Opt-in low-CPU path: plays the stream through the WebView's own decoder instead of the
-           transcode, at the price of buffering latency. Deliberately a plain, clearly-labelled choice —
-           it is a trade, not an improvement. LINUX ONLY: Windows (WebView2) always has WebRTC, so the
-           trade never arises there and the toggle would only invite a worse configuration. -->
-      {#if isLinux}
-        <div class="field-row mse-row">
-          <Toggle checked={$videoState.rtspMse} onchange={(c) => setRtspMse(c)} id="vp-rtsp-mse" />
-          <span class="label">{$t('video.rtspMse')}</span>
-        </div>
-        <p class="hint">{$t('video.rtspMseHint')}</p>
-
-        <!-- Width cap for the converted (MJPEG) fallback stream. Only meaningful where that fallback
-             exists (Linux WebViews without WebRTC): the transcode is CPU-decoded at BOTH ends, so on a
-             small host showing a small window, full source size is paid for nothing. -->
-        <label class="field mse-row">
-          <span class="label">{$t('video.rtspMaxWidth')}</span>
-          <select
-            value={String($videoState.rtspMaxWidth)}
-            onchange={(e) => setRtspMaxWidth(Number((e.currentTarget as HTMLSelectElement).value))}
-          >
-            <option value="0">{$t('video.rtspMaxWidthOff')}</option>
-            <option value="960">960 px</option>
-            <option value="640">640 px</option>
-          </select>
-        </label>
-        <p class="hint">{$t('video.rtspMaxWidthHint')}</p>
-      {/if}
-
       {#if engineChecked && !engineVer}
         <!-- go2rtc is required for any RTSP source. -->
         <div class="ffmpeg-box">
@@ -685,8 +655,6 @@
     font-size: 13px;
   }
   .rtsp-save:disabled { opacity: 0.4; cursor: not-allowed; }
-
-  .mse-row { margin-top: 4px; }
 
   .rtsp-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
   .rtsp-item {

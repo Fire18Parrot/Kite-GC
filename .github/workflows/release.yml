@@ -89,9 +89,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install system dependencies
-        # The gstreamer runtime sets are here for bundle>linux>appimage>bundleMediaFramework: the
-        # linuxdeploy gstreamer plugin copies whatever plugins the RUNNER has into the AppImage, so
-        # its bundled WebKit gets an H.264 decoder (libav) on every target machine.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -102,13 +99,6 @@ jobs:
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             libudev-dev \
-            gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad \
-            gstreamer1.0-libav \
-            gstreamer1.0-gl \
-            gstreamer1.0-pulseaudio \
-            gstreamer1.0-alsa \
             patchelf \
             file \
             libfuse2 \
@@ -146,9 +136,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install system dependencies
-        # The gstreamer runtime sets are here for bundle>linux>appimage>bundleMediaFramework: the
-        # linuxdeploy gstreamer plugin copies whatever plugins the RUNNER has into the AppImage, so
-        # its bundled WebKit gets an H.264 decoder (libav) on every target machine.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -159,13 +146,6 @@ jobs:
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             libudev-dev \
-            gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad \
-            gstreamer1.0-libav \
-            gstreamer1.0-gl \
-            gstreamer1.0-pulseaudio \
-            gstreamer1.0-alsa \
             patchelf \
             file \
             libfuse2 \

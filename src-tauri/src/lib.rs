@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 
 mod aero;
+mod child_env;
 mod commands;
 mod debug_mode;
 mod flightlog;

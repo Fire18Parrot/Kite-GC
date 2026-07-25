@@ -59,6 +59,7 @@ pub fn version() -> Option<String> {
     let ff = find_ffmpeg()?;
     let mut cmd = std::process::Command::new(&ff);
     cmd.arg("-version");
+    crate::child_env::sanitize(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -162,12 +163,10 @@ fn extract_from_tar_xz(bytes: &[u8], target: &Path, dir: &Path) -> Result<(), St
 
     // `-xJf` = extract + xz-decompress. Needs `tar` (and xz support) on the system — universal on
     // desktop distros, occasionally absent on minimal images.
-    let status = Command::new("tar")
-        .arg("-xJf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(&out)
-        .status();
+    let mut tar = Command::new("tar");
+    tar.arg("-xJf").arg(&archive).arg("-C").arg(&out);
+    crate::child_env::sanitize(&mut tar);
+    let status = tar.status();
     let ok = match status {
         Ok(s) if s.success() => true,
         Ok(_) => false,

@@ -95,6 +95,7 @@ impl MjpegServer {
         args.extend(["-flush_packets".into(), "1".into(), "-f".into(), "mpjpeg".into(), "-".into()]);
 
         let mut cmd = Command::new(&ffmpeg_bin);
+        crate::child_env::sanitize(&mut cmd);
         cmd.args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()) // capture ffmpeg errors for the log (tester diagnostics)

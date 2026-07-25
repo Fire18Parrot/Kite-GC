@@ -83,6 +83,7 @@ pub fn version() -> Option<String> {
     let decoder = super::blackbox::find_decoder()?;
     let mut cmd = std::process::Command::new(&decoder);
     cmd.arg("--version");
+    crate::child_env::sanitize(&mut cmd);
     // Don't flash a console window on Windows (this runs whenever Settings is opened).
     #[cfg(windows)]
     {

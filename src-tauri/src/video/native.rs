@@ -210,6 +210,7 @@ pub fn needs_transcode(codec: &str) -> bool {
 fn run_ffmpeg_stderr(args: &[&str]) -> Option<String> {
     let bin = super::ffmpeg::find_ffmpeg()?;
     let mut cmd = Command::new(&bin);
+    crate::child_env::sanitize(&mut cmd);
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null()) // listings go to stderr; discard stdout so it can't fill a pipe
