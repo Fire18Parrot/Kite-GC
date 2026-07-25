@@ -66,6 +66,11 @@ The RTSP source has a small **connection manager** built in:
   resolutions possible on weak hardware — but the picture runs roughly a second behind. Intended for
   machines that can't sustain the normal path (see the [platform notes](#platform-notes-what-to-expect-per-operating-system));
   leave it off whenever latency matters.
+- **Converted stream size** (Linux only) — when the stream plays over the **converted fallback path**
+  (see the platform notes), this scales it down **before** conversion: Original, 960 px or 640 px wide.
+  A smaller size cuts the conversion CPU load sharply on both ends with no extra delay. Pick a size close
+  to how large the video is actually shown on screen — the picture only gets softer when it is displayed
+  larger than the chosen size. Has no effect on the direct playback path.
 - **The list** — each saved connection is a one-line entry: **click it to load and connect**, ✎ edits
   name / URL / transport inline, ✕ removes it. The entry matching the current URL is highlighted.
 
