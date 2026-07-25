@@ -347,6 +347,7 @@ export function bindVideoEl(el: HTMLVideoElement | null, stream: MediaStream | n
  *  floating window / widget can size to the real aspect ratio (RTSP has no upfront caps). */
 export function reportVideoSize(width: number, height: number): void {
   if (!width || !height) return;
+  rtspMjpegFailures = 0; // a frame was decoded → whatever decoder is in use is working
   // Change-guarded: the MJPEG `<img>` path reports from onload, which SOME engines fire per multipart
   // frame — an unguarded patch would churn the store at frame rate.
   const s = get(videoState);
@@ -714,6 +715,9 @@ const RTSP_STALL_LIVE_MS = 10_000;
 const RTSP_RECONNECT_BACKOFF_MS = 1500;
 let rtspMonitor: ReturnType<typeof setInterval> | undefined;
 let rtspReconnectTimer: ReturnType<typeof setTimeout> | undefined;
+/** Consecutive MJPEG `<img>` failures on the RTSP feed; resets as soon as frames arrive. Used to
+ *  give up on the hardware decoder rather than loop forever on a host it doesn't work on. */
+let rtspMjpegFailures = 0;
 
 function clearRtspTimers(): void {
   if (rtspMonitor) { clearInterval(rtspMonitor); rtspMonitor = undefined; }
@@ -913,7 +917,10 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
     mjpegUrl: null,
     ...(reconnect ? {} : { reconnecting: false, reconnectAttempt: 0 }),
   });
-  if (!reconnect) savePrefs();
+  if (!reconnect) {
+    savePrefs();
+    rtspMjpegFailures = 0; // a deliberate (re)start gets the hardware decoder another chance
+  }
 
   if (!reconnect) {
     // A missing engine cannot be fixed by retrying, so it must not enter the loop: before this, an
@@ -950,7 +957,16 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
       return;
     }
     try {
-      await invoke('video_webrtc_start', { url, useFfmpeg: transport === 'udp', mjpeg: true });
+      // Hardware H.264 decoding (Pi 3/4 class boards) is the backend's call — but only while this
+      // feed has actually been delivering. Two failures in a row and we ask for the software decoder,
+      // so a host that passes the backend's probe yet can't hold a live stream on the hardware path
+      // still ends up with a picture instead of an endless reconnect loop.
+      await invoke('video_webrtc_start', {
+        url,
+        useFfmpeg: transport === 'udp',
+        mjpeg: true,
+        allowHwDecode: rtspMjpegFailures < 2,
+      });
       const mjpegUrl = await buildMjpegUrl();
       patch({ status: 'live', mjpegUrl, error: null, rtspEngine: 'native', reconnecting: false, reconnectAttempt: 0 });
     } catch (e) {
@@ -990,6 +1006,7 @@ export function reportMjpegError(): void {
   if (!st.enabled || !st.mjpegUrl) return;
   if (st.kind === 'rtsp') {
     logVideo('warn', `MJPEG image failed to load (${st.mjpegUrl}) — reconnecting`);
+    rtspMjpegFailures++;
     scheduleRtspReconnect();
     return;
   }

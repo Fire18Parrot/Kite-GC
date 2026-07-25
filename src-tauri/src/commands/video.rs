@@ -71,14 +71,24 @@ pub async fn video_go2rtc_download(app_handle: AppHandle) -> Result<String, Stri
 /// only mode that reads quirky servers (e.g. obs-rtspserver, which 461s any forced transport). Used
 /// as the automatic fallback when the native client fails.
 ///
+/// `allow_hw_decode`: caller veto for the hardware decoder on the MJPEG path (default: allowed). The
+/// frontend turns it off after repeated failures, so a host that passes the probe but cannot actually
+/// keep a live stream on the hardware decoder still ends up with a working picture.
 #[tauri::command]
 pub async fn video_webrtc_start(
     url: String,
     use_ffmpeg: bool,
     mjpeg: bool,
+    allow_hw_decode: Option<bool>,
     engine: State<'_, Go2Rtc>,
 ) -> Result<(), String> {
     let port = engine.ensure_running()?;
+    // Probing runs two short ffmpeg processes, so keep it off the async runtime's thread.
+    let hw_decode = mjpeg
+        && allow_hw_decode.unwrap_or(true)
+        && tauri::async_runtime::spawn_blocking(crate::video::ffmpeg::v4l2_h264_decode_available)
+            .await
+            .unwrap_or(false);
     // `mjpeg` = the consumer will be go2rtc's `/api/stream.mjpeg` endpoint, which can only serve a
     // stream that actually carries an MJPEG track. An ordinary H.264 camera does not, so the source
     // must be registered with `#video=mjpeg` — an ffmpeg TRANSCODE, not a copy. Without it the endpoint
@@ -87,7 +97,17 @@ pub async fn video_webrtc_start(
     // `input=rtsp/udp` template (ffmpeg with NO forced -rtsp_transport) rather than honouring the
     // transport choice: that is the only variant that also reads UDP-only servers, and a connection
     // left on "Auto" would otherwise fail to open one at all.
-    let src = if mjpeg {
+    let src = if mjpeg && hw_decode {
+        // go2rtc's own `rtsp/udp` template with the hardware decoder selected for the input. The
+        // encode stays software — these SoCs have no hardware MJPEG encoder — but the decode is the
+        // expensive half on a 720p60 source, and on a Pi 4 it is the difference between a usable
+        // picture and none. Everything else is byte-identical to the software template, so a stream
+        // that reads on one reads on the other.
+        format!(
+            "ffmpeg:{url}#input=-c:v h264_v4l2m2m -fflags nobuffer -flags low_delay \
+             -timeout {{timeout}} -user_agent go2rtc/ffmpeg -i {{input}}#video=mjpeg"
+        )
+    } else if mjpeg {
         format!("ffmpeg:{url}#input=rtsp/udp#video=mjpeg")
     } else if use_ffmpeg {
         format!("ffmpeg:{url}#input=rtsp/udp#video=copy")

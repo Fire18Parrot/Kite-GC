@@ -10,6 +10,10 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
+#[cfg(target_os = "linux")]
+use std::sync::OnceLock;
 
 const REPO: &str = "BtbN/FFmpeg-Builds";
 const RELEASES_PAGE: &str = "https://github.com/BtbN/FFmpeg-Builds/releases";
@@ -70,6 +74,72 @@ pub fn version() -> Option<String> {
         .lines()
         .next()
         .map(|l| l.trim().to_string())
+}
+
+/// Whether this host decodes H.264 through the kernel's V4L2 M2M interface — i.e. in hardware.
+/// True on a Raspberry Pi 3/4 and similar SoCs; false on a Pi 5, which has no H.264 decode block at
+/// all.
+///
+/// It matters only for the MJPEG fallback, and there it matters a lot: that path decodes **every**
+/// frame of the source before re-encoding it, and a board that needs hardware for 720p60 cannot do it
+/// any other way. go2rtc cannot arrange this for us — its `#hardware` option swaps the *encoder* for
+/// V4L2 M2M and never touches the input — so we select the decoder ourselves via a custom input
+/// template.
+///
+/// Probed by actually decoding a one-second clip, because the codec being listed proves nothing: every
+/// Linux ffmpeg build compiles `h264_v4l2m2m` in, device or no device. Cached for the process and
+/// logged once, so a tester's log states the verdict.
+#[cfg(target_os = "linux")]
+pub fn v4l2_h264_decode_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let ok = probe_v4l2_h264_decode();
+        log::warn!(
+            "[ffmpeg] V4L2 hardware H.264 decoding: {}",
+            if ok {
+                "available — used for the MJPEG transcode"
+            } else {
+                "unavailable — the MJPEG transcode decodes in software"
+            }
+        );
+        ok
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn v4l2_h264_decode_available() -> bool {
+    false
+}
+
+/// Encode a throwaway clip in software, then decode it back through `h264_v4l2m2m`. Both steps must
+/// succeed; anything else (no ffmpeg, no libx264, no decode device) means "software".
+#[cfg(target_os = "linux")]
+fn probe_v4l2_h264_decode() -> bool {
+    let Some(ff) = find_ffmpeg() else {
+        return false;
+    };
+    let clip = std::env::temp_dir().join("kite-hwdecode-probe.h264");
+    let clip_arg = clip.to_string_lossy().to_string();
+    let run = |args: &[&str]| -> bool {
+        let mut cmd = Command::new(&ff);
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::child_env::sanitize(&mut cmd);
+        matches!(cmd.status(), Ok(s) if s.success())
+    };
+    let made = run(&[
+        "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+        "testsrc=size=320x240:rate=10:duration=1", "-c:v", "libx264", "-f", "h264", &clip_arg,
+    ]);
+    let ok = made
+        && run(&[
+            "-hide_banner", "-loglevel", "error", "-c:v", "h264_v4l2m2m", "-i", &clip_arg, "-f",
+            "null", "-",
+        ]);
+    let _ = std::fs::remove_file(&clip);
+    ok
 }
 
 /// BtbN asset selector for this OS+arch: (filename substring, archive extension), or None when we
