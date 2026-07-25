@@ -63,13 +63,20 @@
     bindVideoEl(videoEl, $videoStream);
   });
 
-  // Populate the device lists when the panel opens. The getUserMedia list is only consumed by the
-  // `camera` source; on Linux, enumerating it drives WebKit's GStreamer/pipewire stack, which can hang
-  // ~35 s on an unreachable pipewire and freeze the app — so there we enumerate it only when the camera
-  // source is actually selected. The native list comes from the Rust V4L2 backend (no pipewire).
+  // Populate the getUserMedia device list. It is only consumed by the `camera` source; on Linux,
+  // enumerating it drives WebKit's GStreamer/pipewire stack, which can hang ~35 s on an unreachable
+  // pipewire and freeze the app — so there we enumerate it only while the camera source is selected.
+  // (The native list comes from the Rust backend and is enumerated once on mount, below.)
+  //
+  // The condition MUST come through this narrow $derived: an effect that reads `$videoState` directly
+  // depends on the WHOLE store, and every enumeration writes back into it (devices / nativeDevices) —
+  // which re-triggers the effect forever. That hit Linux only, because there the `||` short-circuit
+  // does not skip the store read: a permanent enumerate → patch → enumerate loop (IPC + an ffmpeg
+  // probe process + a localStorage write per round, and a stream restart when the saved device is
+  // stale). A $derived boolean re-evaluates but only propagates when it actually flips.
+  const needCameraList = $derived(!isLinux || $videoState.kind === 'camera');
   $effect(() => {
-    if (!isLinux || $videoState.kind === 'camera') void enumerateVideoDevices();
-    void enumerateNativeDevices();
+    if (needCameraList) void enumerateVideoDevices();
   });
 
   // ── RTSP / V4L2 dependencies ──────────────────────────────────────────
@@ -139,6 +146,10 @@
   onMount(() => {
     void checkEngine();
     void checkFfmpeg();
+    // Native capture devices: enumerated once per panel open (the Rust backend reads V4L2 sysfs /
+    // DirectShow / AVFoundation). Deliberately NOT in an $effect — it writes `nativeDevices` back into
+    // the video store, which would make any store-reading effect re-trigger itself (see above).
+    void enumerateNativeDevices();
     const unlisteners: UnlistenFn[] = [];
     void listen<{ pct: number; msg: string }>('go2rtc-download-progress', (e) => {
       enginePct = e.payload.pct;
