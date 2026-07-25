@@ -66,32 +66,38 @@ With a sensibly-configured encoder, end-to-end latency is low (roughly a couple 
 If it's much worse, the cause is usually the **source**: a large keyframe interval, a big encoder buffer,
 or a non-low-latency tuning. Tune the encoder/camera for low-latency streaming.
 
-## Linux: high CPU load, stuttering, or "Reconnecting…" that never settles
+## Linux: high CPU load or a stuttering picture
 
-On Linux, Kite depends on your distribution's browser-engine and GStreamer packages for all video work
-— see the **[platform notes](../guides/video.md#platform-notes-what-to-expect-per-operating-system)**
-in the guide for what that means. The log tells you exactly what your system offers. Set **Settings →
-Diagnostics → Log Level** to **Warning** (the default is enough), restart Kite, start your stream, then
-open the log and look for these lines:
+On Linux, Kite depends on your distribution's browser-engine build for video — see the
+**[platform notes](../guides/video.md#platform-notes-what-to-expect-per-operating-system)** in the
+guide. The log tells you what your system offers. Restart Kite, start your stream, then open the log
+(**Settings → Diagnostics**, the default **Warning** level is enough) and look for:
 
 ```
-[webkit] WebKitGTK 2.xx.y — enable-webrtc set, reads back as true
-[gstreamer] webrtcbin=false · h264 decoders=[] — …
-WebRTC is unavailable in this WebView — falling back to the MJPEG image path
+[webkit]    WebKitGTK 2.xx.y — enable-webrtc set, reads back as true
+[gstreamer] webrtcbin=… · h264 decoders=[…]
+            WebRTC is unavailable in this WebView — falling back to the MJPEG image path
 ```
 
-- **`webrtcbin=false`** — the efficient direct path is unavailable, so Kite converts the stream frame by
-  frame, which is what drives the CPU up. Install the plugin package and restart:
-  ```bash
-  sudo apt install gstreamer1.0-plugins-bad     # Debian / Ubuntu / Raspberry Pi OS
-  ```
-- **`h264 decoders=[]`** — no H.264 decoder is installed at all; add `gstreamer1.0-libav` as well.
-- **"WebRTC is unavailable …"** without either of the above — your engine build genuinely has no WebRTC.
-  The converted-image path still gives you a picture; reducing the source resolution or frame rate at the
-  camera end is then the effective lever.
+**If the last line is there, the direct playback path isn't available on this machine.** Kite then
+converts the stream frame by frame, which is what drives the CPU up and limits the resolution you can
+sustain. Two things are worth knowing:
 
-If the CPU stays high even with a small picture, that is the conversion itself, not Kite's interface.
-Software conversion of a 720p60 stream is beyond a single-board computer regardless of settings.
+- **This is usually not something you can install your way out of.** Several Linux distributions —
+  Raspberry Pi OS among them — ship a browser engine built *without* the direct video path, and it then
+  stays unavailable no matter which media packages are present. On a Raspberry Pi 5 we measured the
+  engine reporting the feature as enabled, all the expected media plugins installed, and it still wasn't
+  there. If `webrtcbin=false` appears in your log it is still worth installing
+  `gstreamer1.0-plugins-bad` (and `gstreamer1.0-libav` if the decoder list is empty) — that is a genuine
+  prerequisite — but do not expect it to be sufficient.
+- **Use the low-CPU mode instead.** The Video panel offers **Low-CPU mode (MediaSource)** for the RTSP
+  source. It plays the stream directly rather than converting it, so the CPU load drops sharply and
+  higher resolutions become possible — at the price of roughly a second of extra delay. That trade is
+  fine for setup, monitoring or checking a camera; leave it **off** when you need the lowest latency.
+
+If the CPU stays high with the mode off and a small picture, that is the conversion itself, not Kite's
+interface: converting a 720p60 stream in software is beyond a single-board computer regardless of
+settings.
 
 ## Raspberry Pi: garbled or black window right after start
 

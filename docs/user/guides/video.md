@@ -61,6 +61,11 @@ The RTSP source has a small **connection manager** built in:
 - **Save it** — the **💾 button** stores the current URL + transport as a named entry (named after the
   host; rename it via ✎). Connections are **only saved when you press the button** — never
   automatically.
+- **Low-CPU mode (MediaSource)** — a per-machine option, off by default. It hands the stream to the
+  system's own video decoder instead of converting it, which cuts CPU load dramatically and makes higher
+  resolutions possible on weak hardware — but the picture runs roughly a second behind. Intended for
+  machines that can't sustain the normal path (see the [platform notes](#platform-notes-what-to-expect-per-operating-system));
+  leave it off whenever latency matters.
 - **The list** — each saved connection is a one-line entry: **click it to load and connect**, ✎ edits
   name / URL / transport inline, ✕ removes it. The entry matching the current URL is highlighted.
 
@@ -135,13 +140,15 @@ work to GStreamer — and which plugins your distribution installs is entirely u
 There are hundreds of combinations of distro, desktop, graphics driver and plugin set, and we cannot
 test or support them all. Concretely, these are things Kite cannot fix from its side:
 
-- **Whether an RTSP stream can be played directly at all.** The efficient path needs WebRTC support in
-  the browser engine, which in turn needs GStreamer's `webrtcbin` element (usually the
-  `gstreamer1.0-plugins-bad` package). If it's missing, the engine silently offers no WebRTC and Kite
-  falls back to a **converted image stream** — this still works, but it has to decode and re-encode
-  every frame, which costs **considerably more CPU**. On a small machine that can mean a stuttering
-  picture. Kite records what your system provides in the diagnostic log (see
-  **[Video troubleshooting](../troubleshooting/video.md)**), so you can check and install what's missing.
+- **Whether an RTSP stream can be played directly at all.** Several distributions — Raspberry Pi OS
+  among them — ship a browser engine built **without** the direct (WebRTC) video path, and that cannot
+  be installed after the fact. Kite then falls back to a **converted image stream**: it still works, but
+  every frame is decoded and re-encoded, which costs **considerably more CPU** and on a small machine
+  means a stuttering picture at higher resolutions. For those machines the Video panel offers
+  **Low-CPU mode (MediaSource)**, which plays the stream directly instead of converting it — much less
+  load and higher resolutions, at the price of roughly a second of extra delay. Kite records what your
+  system provides in the diagnostic log, so you can see which path you're on (see
+  **[Video troubleshooting](../troubleshooting/video.md)**).
 - **Whether decoding uses the graphics hardware.** Hardware video decoding depends on your driver and
   the installed plugins, and on some machines it simply isn't available — everything is then done on the
   CPU. We cannot guarantee hardware decoding on Linux, and single-board computers with no H.264 decoder
