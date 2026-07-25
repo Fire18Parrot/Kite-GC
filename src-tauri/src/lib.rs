@@ -242,10 +242,18 @@ fn nudge_framebuffer_on_pi(window: tauri::Window) {
 /// weaker evidence than `gst-inspect`, but the difference between an answer and none at all.
 #[cfg(target_os = "linux")]
 fn probe_gstreamer_plugin_files() -> (bool, Vec<&'static str>) {
-    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("GST_PLUGIN_PATH")
-        .iter()
-        .flat_map(std::env::split_paths)
-        .collect();
+    // The _1_0/SYSTEM variants matter inside the AppImage: linuxdeploy's gstreamer hook points
+    // GST_PLUGIN_SYSTEM_PATH_1_0 at the bundled plugin set, which is exactly what WebKit sees there.
+    let mut dirs: Vec<std::path::PathBuf> = [
+        "GST_PLUGIN_PATH",
+        "GST_PLUGIN_PATH_1_0",
+        "GST_PLUGIN_SYSTEM_PATH",
+        "GST_PLUGIN_SYSTEM_PATH_1_0",
+    ]
+    .iter()
+    .filter_map(std::env::var_os)
+    .flat_map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
+    .collect();
     for base in [
         "/usr/lib/aarch64-linux-gnu",
         "/usr/lib/x86_64-linux-gnu",
