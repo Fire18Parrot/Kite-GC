@@ -1208,12 +1208,28 @@ export async function enterPiP(): Promise<void> {
 /** Delay before auto-starting the Linux `camera` source, so the UI paints first (see `initVideo`). */
 const LINUX_CAMERA_AUTOSTART_DELAY_MS = 1200;
 
+/** One-time record of what this WebView can actually play. Which of these constructors exist decides
+ *  the entire video strategy — WebRTC means H.264 straight to the decoder, MediaSource means the same
+ *  decoder with a playback buffer in front, neither means the expensive MJPEG transcode — and on Linux
+ *  it varies by distro and build in ways nothing else reveals. `webkitRTCPeerConnection` is checked too
+ *  so a merely *prefixed* implementation can't masquerade as "no WebRTC at all". */
+function logWebViewMediaSupport(): void {
+  const has = (name: string) => name in globalThis;
+  logVideo(
+    'info',
+    `WebView media support: RTCPeerConnection=${has('RTCPeerConnection')} ` +
+      `webkitRTCPeerConnection=${has('webkitRTCPeerConnection')} ` +
+      `MediaSource=${has('MediaSource')} ManagedMediaSource=${has('ManagedMediaSource')}`,
+  );
+}
+
 /**
  * App-startup hook: enumerate devices and, if video was running at last close,
  * auto-start it with the persisted settings (device falls back to default if the
  * saved one is gone). Call once, client-side.
  */
 export async function initVideo(): Promise<void> {
+  logWebViewMediaSupport();
   // Skip getUserMedia enumeration at startup on Linux: it drives WebKit's GStreamer capture stack
   // (pipewire), which hangs ~35 s and freezes launch on boxes with an unreachable pipewire (the
   // symptom the native/MJPEG path was meant to avoid). Only the `camera` source needs this list, and

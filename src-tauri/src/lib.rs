@@ -113,6 +113,154 @@ pub fn is_portable() -> bool {
         .unwrap_or(false)
 }
 
+/// Log which of the GStreamer elements WebKitGTK depends on are actually installed.
+///
+/// WebKitGTK implements neither WebRTC nor video decoding itself — it delegates both to GStreamer.
+/// When `webrtcbin` is missing, `RTCPeerConnection` simply never appears: no error, no warning, and
+/// RTSP silently degrades to the far more expensive MJPEG transcode. Two different WebKit builds on the
+/// same Raspberry Pi produced the identical failure, which is the signature of a host-side plugin gap
+/// rather than a WebKit one — but confirming that meant asking the tester to run `gst-inspect-1.0` by
+/// hand and copy the output back, which on a remote-desktop session is genuinely awkward. The app can
+/// just say it.
+///
+/// Runs on a background thread (each `gst-inspect` call costs ~100 ms) and reports at warn level, since
+/// a missing element is a real, actionable degradation.
+#[cfg(target_os = "linux")]
+fn probe_gstreamer_support() {
+    std::thread::spawn(|| {
+        let run = |args: &[&str]| -> bool {
+            std::process::Command::new("gst-inspect-1.0")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .stdin(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        // The tool itself ships separately (gstreamer1.0-tools). Without it we cannot tell, and
+        // reporting "absent" would be a lie.
+        if !run(&["--version"]) {
+            log::warn!(
+                "[gstreamer] gst-inspect-1.0 not found (gstreamer1.0-tools) — cannot verify WebKit's media plugins"
+            );
+            return;
+        }
+        let webrtc = run(&["webrtcbin"]);
+        let decoders: Vec<&str> = ["avdec_h264", "openh264dec", "v4l2h264dec", "vah264dec"]
+            .into_iter()
+            .filter(|e| run(&[e]))
+            .collect();
+        log::warn!(
+            "[gstreamer] webrtcbin={} · h264 decoders=[{}] — WebKitGTK needs webrtcbin for RTCPeerConnection \
+             (gstreamer1.0-plugins-bad) and an H.264 decoder to play video (gstreamer1.0-libav)",
+            webrtc,
+            decoders.join(", ")
+        );
+    });
+}
+
+/// Raspberry Pi workaround: force the WebKit framebuffer to be reallocated once the UI is up.
+///
+/// With GPU acceleration enabled, the Pi's **first** framebuffer allocation is reliably broken — the
+/// window shows garbage until something makes WebKit allocate a new one. Any change of the drawing
+/// surface does that, so we perform the smallest one available for the window's current state and
+/// immediately undo it. The same workaround is in use on the maintainer's Pi dashboard project.
+///
+/// One nudge per run, triggered by `PageLoadEvent::Finished` (the DOM being ready is the earliest
+/// point at which there is a real frame to fix), plus a short settle delay because "document loaded"
+/// is not yet "first frame composited".
+#[cfg(target_os = "linux")]
+fn nudge_framebuffer_on_pi(window: tauri::Window) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    /// `on_page_load` also fires for reloads and in-app navigation; the surface only needs fixing once.
+    static DONE: AtomicBool = AtomicBool::new(false);
+
+    // `/proc/device-tree/model` is the canonical Pi identifier ("Raspberry Pi 5 Model B Rev 1.0"). It's
+    // absent on every non-device-tree machine, so this is a no-op on ordinary Linux desktops — the bug
+    // is specific to this GPU.
+    let model = std::fs::read_to_string("/proc/device-tree/model").unwrap_or_default();
+    if !model.contains("Raspberry Pi") {
+        return;
+    }
+    if DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        // Long enough for the compositor to actually act on the change before we undo it.
+        let settle = std::time::Duration::from_millis(120);
+
+        // Each window state needs its own smallest possible disturbance: resizing a fullscreen or
+        // maximized window would fight the window manager (and was simply skipped before, which left
+        // exactly the full-screen case — the normal one on a Pi — unfixed).
+        if window.is_fullscreen().unwrap_or(false) {
+            let _ = window.set_fullscreen(false);
+            tokio::time::sleep(settle).await;
+            let _ = window.set_fullscreen(true);
+            log::info!("[gpu] Raspberry Pi framebuffer nudge: fullscreen off/on");
+        } else if window.is_maximized().unwrap_or(false) {
+            let _ = window.unmaximize();
+            tokio::time::sleep(settle).await;
+            let _ = window.maximize();
+            log::info!("[gpu] Raspberry Pi framebuffer nudge: unmaximize/maximize");
+        } else if let Ok(size) = window.inner_size() {
+            let _ = window.set_size(tauri::PhysicalSize::new(size.width, size.height + 1));
+            tokio::time::sleep(settle).await;
+            let _ = window.set_size(size);
+            log::info!("[gpu] Raspberry Pi framebuffer nudge: {}x{} +1px", size.width, size.height);
+        }
+    });
+}
+
+/// Log which of the GStreamer elements WebKitGTK depends on are actually installed.
+///
+/// WebKitGTK implements neither WebRTC nor video decoding itself — it delegates both to GStreamer.
+/// When `webrtcbin` is missing, `RTCPeerConnection` simply never appears: no error, no warning, and
+/// RTSP silently degrades to the far more expensive MJPEG transcode. Two different WebKit builds on the
+/// same Raspberry Pi produced the identical failure, which is the signature of a host-side plugin gap
+/// rather than a WebKit one — but confirming that meant asking the tester to run `gst-inspect-1.0` by
+/// hand and copy the output back, which on a remote-desktop session is genuinely awkward. The app can
+/// just say it.
+///
+/// Runs on a background thread (each `gst-inspect` call costs ~100 ms) and reports at warn level, since
+/// a missing element is a real, actionable degradation.
+#[cfg(target_os = "linux")]
+fn probe_gstreamer_support() {
+    std::thread::spawn(|| {
+        let run = |args: &[&str]| -> bool {
+            std::process::Command::new("gst-inspect-1.0")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .stdin(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        // The tool itself ships separately (gstreamer1.0-tools). Without it we cannot tell, and
+        // reporting "absent" would be a lie.
+        if !run(&["--version"]) {
+            log::warn!(
+                "[gstreamer] gst-inspect-1.0 not found (gstreamer1.0-tools) — cannot verify WebKit's media plugins"
+            );
+            return;
+        }
+        let webrtc = run(&["webrtcbin"]);
+        let decoders: Vec<&str> = ["avdec_h264", "openh264dec", "v4l2h264dec", "vah264dec"]
+            .into_iter()
+            .filter(|e| run(&[e]))
+            .collect();
+        log::warn!(
+            "[gstreamer] webrtcbin={} · h264 decoders=[{}] — WebKitGTK needs webrtcbin for RTCPeerConnection \
+             (gstreamer1.0-plugins-bad) and an H.264 decoder to play video (gstreamer1.0-libav)",
+            webrtc,
+            decoders.join(", ")
+        );
+    });
+}
+
 /// Raspberry Pi workaround: force the WebKit framebuffer to be reallocated shortly after start-up.
 ///
 /// With GPU acceleration enabled, the Pi's **first** framebuffer allocation is usually broken — the
@@ -324,9 +472,17 @@ pub fn run() {
                         });
                     });
                 }
-                nudge_framebuffer_on_pi(_app);
+                probe_gstreamer_support();
             }
             Ok(())
+        })
+        .on_page_load(|_webview, _payload| {
+            // The Pi's first framebuffer is garbage until the surface changes — do it once the page is
+            // actually up (see `nudge_framebuffer_on_pi`).
+            #[cfg(target_os = "linux")]
+            if _payload.event() == tauri::webview::PageLoadEvent::Finished {
+                nudge_framebuffer_on_pi(_webview.window());
+            }
         })
         .manage(AppState::new())
         .manage(MissionStore::new())
