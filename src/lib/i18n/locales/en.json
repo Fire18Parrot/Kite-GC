@@ -644,6 +644,8 @@
     "rtspUrl": "RTSP URL",
     "rtspTransportHint": "Transport: UDP (lowest latency, e.g. UAV-Link), TCP, or Auto (try both)",
     "rtspAuto": "Auto",
+    "rtspMse": "Low-CPU mode (MediaSource)",
+    "rtspMseHint": "For slower machines: plays the stream directly instead of converting it, which uses far less CPU and makes higher resolutions possible — but adds noticeably more delay (roughly a second). Leave off for the lowest latency.",
     "rtspSave": "Save connection to the list",
     "rtspName": "Name",
     "rtspEdit": "Edit connection",

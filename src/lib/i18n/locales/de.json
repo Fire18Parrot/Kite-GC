@@ -644,6 +644,8 @@
     "rtspUrl": "RTSP-URL",
     "rtspTransportHint": "Transport: UDP (niedrigste Latenz, z. B. UAV-Link), TCP oder Auto (beide versuchen)",
     "rtspAuto": "Auto",
+    "rtspMse": "Modus für schwache Systeme (MediaSource)",
+    "rtspMseHint": "Für langsamere Rechner: spielt den Stream direkt ab statt ihn umzuwandeln — deutlich weniger CPU-Last und höhere Auflösungen möglich, dafür spürbar mehr Verzögerung (etwa eine Sekunde). Für minimale Latenz ausgeschaltet lassen.",
     "rtspSave": "Verbindung in der Liste speichern",
     "rtspName": "Name",
     "rtspEdit": "Verbindung bearbeiten",
