@@ -788,6 +788,37 @@ async function negotiateRtsp(url: string, transport: RtspTransport): Promise<voi
   }
 }
 
+/** Key marking that this run already tried the WebRTC reload (see `reloadOnceForWebrtc`). */
+const WEBRTC_RELOAD_KEY = 'kite-gc-webrtc-reload';
+
+/** WebKitGTK decides which constructors a page gets when it creates that document's JS context — and
+ *  Kite's only opportunity to switch WebRTC on (a WebView setting applied from Rust during start-up)
+ *  runs *after* the first document already exists. The switch is then set correctly but too late for
+ *  the page that is running, so `RTCPeerConnection` never appears.
+ *
+ *  Observed on a Raspberry Pi 5: WebKitGTK 2.52.5, `enable-webrtc` reads back as `true`, GStreamer has
+ *  `webrtcbin` and two H.264 decoders — and still no WebRTC. Reloading once builds a fresh context with
+ *  the setting already applied.
+ *
+ *  At most once per run: if WebRTC is still missing afterwards the engine genuinely cannot do it, and
+ *  reloading again would be an endless loop. Returns true when a reload was started, in which case the
+ *  caller must stop — this page is going away. The video source is already persisted as enabled at this
+ *  point, so the feed comes back by itself on the new page. */
+function reloadOnceForWebrtc(): boolean {
+  if (!isLinux || isWebrtcAvailable()) return false;
+  try {
+    if (sessionStorage.getItem(WEBRTC_RELOAD_KEY)) return false;
+    sessionStorage.setItem(WEBRTC_RELOAD_KEY, '1');
+    // Only reload once the guard is provably stored — without it this would loop forever.
+    if (sessionStorage.getItem(WEBRTC_RELOAD_KEY) !== '1') return false;
+  } catch {
+    return false;
+  }
+  logVideo('warn', 'WebRTC missing although the engine reports it enabled — reloading once so the setting takes effect');
+  location.reload();
+  return true;
+}
+
 /** Open (or re-open) the RTSP feed via go2rtc, honouring the active transport. Once live, a stall
  *  monitor watches for frame timeouts; any failure/drop enters the infinite reconnect loop (until
  *  frames return or the user stops). `reconnect` distinguishes a loop retry from a fresh start. */
@@ -834,6 +865,9 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
   // only an explicit UDP selection routes through the ffmpeg reader (needs ffmpeg, like the normal
   // UDP path).
   if (!isWebrtcAvailable()) {
+    // The setting may simply have arrived too late for this document — one reload fixes that, and if it
+    // doesn't, this returns false from here on and we take the fallback below.
+    if (reloadOnceForWebrtc()) return;
     // Degraded mode, and a silent one: it needs go2rtc to transcode to MJPEG and a WebView that renders
     // multipart images. Worth a warning every time, not just a console line.
     if (!reconnect) {

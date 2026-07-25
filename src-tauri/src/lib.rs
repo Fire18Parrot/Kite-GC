@@ -138,19 +138,34 @@ fn probe_gstreamer_support() {
                 .map(|s| s.success())
                 .unwrap_or(false)
         };
-        // The tool itself ships separately (gstreamer1.0-tools). Without it we cannot tell, and
-        // reporting "absent" would be a lie.
+        // `gst-inspect-1.0` ships separately (gstreamer1.0-tools) and is exactly the package a minimal
+        // install lacks — i.e. missing on the very systems where this diagnostic matters most. Fall back
+        // to looking for the plugin libraries themselves, which is what GStreamer would load anyway.
         if !run(&["--version"]) {
+            let (webrtc, decoders) = probe_gstreamer_plugin_files();
             log::warn!(
-                "[gstreamer] gst-inspect-1.0 not found (gstreamer1.0-tools) — cannot verify WebKit's media plugins"
+                "[gstreamer] gst-inspect-1.0 not found (gstreamer1.0-tools); by plugin file: \
+                 webrtc={webrtc} · h264 plugins=[{}] — WebKitGTK needs the webrtc plugin for \
+                 RTCPeerConnection (gstreamer1.0-plugins-bad) and an H.264 decoder (gstreamer1.0-libav)",
+                decoders.join(", ")
             );
             return;
         }
         let webrtc = run(&["webrtcbin"]);
-        let decoders: Vec<&str> = ["avdec_h264", "openh264dec", "v4l2h264dec", "vah264dec"]
-            .into_iter()
-            .filter(|e| run(&[e]))
-            .collect();
+        // Software (libav/openh264) plus the hardware decoders that matter in practice: V4L2 (Raspberry
+        // Pi 4, Rockchip), and Intel VA under both its plugin generations — `vah264dec` from the current
+        // `va` plugin and `vaapih264dec` from the older gstreamer-vaapi. Which of the two a distribution
+        // ships decides whether an Intel laptop decodes in hardware or silently on the CPU.
+        let decoders: Vec<&str> = [
+            "avdec_h264",
+            "openh264dec",
+            "v4l2h264dec",
+            "vah264dec",
+            "vaapih264dec",
+        ]
+        .into_iter()
+        .filter(|e| run(&[e]))
+        .collect();
         log::warn!(
             "[gstreamer] webrtcbin={} · h264 decoders=[{}] — WebKitGTK needs webrtcbin for RTCPeerConnection \
              (gstreamer1.0-plugins-bad) and an H.264 decoder to play video (gstreamer1.0-libav)",
@@ -218,6 +233,48 @@ fn nudge_framebuffer_on_pi(window: tauri::Window) {
 /// executable, redirect all application data into a `data/` folder beside
 /// the exe.  Must be called **before** `run()` so the WebView picks up the
 /// environment variables.
+/// Look for GStreamer plugin **files** when `gst-inspect-1.0` isn't installed. Returns
+/// `(webrtc present, names of the H.264-capable plugins found)`.
+///
+/// Plugins live in `<libdir>/gstreamer-1.0/libgst<name>.so`; the multiarch libdir differs per
+/// architecture, and `GST_PLUGIN_PATH` can add more. This can't tell whether a plugin actually
+/// *registers* its elements (a broken driver may still fail), so it is reported as "by plugin file" —
+/// weaker evidence than `gst-inspect`, but the difference between an answer and none at all.
+#[cfg(target_os = "linux")]
+fn probe_gstreamer_plugin_files() -> (bool, Vec<&'static str>) {
+    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("GST_PLUGIN_PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .collect();
+    for base in [
+        "/usr/lib/aarch64-linux-gnu",
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib/arm-linux-gnueabihf",
+        "/usr/lib64",
+        "/usr/lib",
+        "/usr/local/lib",
+    ] {
+        dirs.push(std::path::Path::new(base).join("gstreamer-1.0"));
+    }
+    let has = |file: &str| dirs.iter().any(|d| d.join(file).is_file());
+
+    // libav covers avdec_h264, the `va`/`vaapi` plugins the Intel/AMD hardware paths, and
+    // video4linux2 the Raspberry Pi 4 / Rockchip stateful decoders.
+    let decoders = [
+        ("libav", "libgstlibav.so"),
+        ("openh264", "libgstopenh264.so"),
+        ("va", "libgstva.so"),
+        ("vaapi", "libgstvaapi.so"),
+        ("v4l2", "libgstvideo4linux2.so"),
+    ]
+    .into_iter()
+    .filter(|(_, file)| has(file))
+    .map(|(name, _)| name)
+    .collect();
+
+    (has("libgstwebrtc.so"), decoders)
+}
+
 pub fn setup_portable_mode() {
     let exe_dir = match std::env::current_exe()
         .ok()
