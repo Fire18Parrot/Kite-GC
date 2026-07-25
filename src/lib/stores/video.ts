@@ -72,6 +72,9 @@ export interface VideoState {
   nativeDevices: NativeDevice[];
   /** Selected native device id (V4L2 path / DirectShow name / AVFoundation index), null if none. */
   nativeDevice: string | null;
+  /** Name of the selected native device — the tie-breaker when the id turns out to be unstable
+   *  (AVFoundation index / `/dev/videoN` both renumber on re-plug). See `resolveNativeDevice`. */
+  nativeDeviceName: string | null;
   /** Probed modes for the selected native device (drives the format→resolution→framerate cascade). */
   nativeModes: CaptureMode[];
   /** Chosen native capture config (format/resolution/framerate). */
@@ -138,6 +141,7 @@ interface VideoPrefs {
   rtspTransport: RtspTransport;
   rtspConnections: RtspConnection[];
   nativeDevice: string | null;
+  nativeDeviceName: string | null;
   nativeWidth: number;
   nativeHeight: number;
   nativeFps: number;
@@ -159,6 +163,7 @@ const PREF_DEFAULTS: VideoPrefs = {
   rtspTransport: 'auto',
   rtspConnections: [],
   nativeDevice: null,
+  nativeDeviceName: null,
   nativeWidth: 1280,
   nativeHeight: 720,
   nativeFps: 30,
@@ -188,6 +193,7 @@ function loadPrefs(): VideoPrefs {
         rtspTransport: p.rtspTransport ?? 'auto',
         rtspConnections: Array.isArray(p.rtspConnections) ? p.rtspConnections : [],
         nativeDevice: p.nativeDevice ?? p.v4l2Device ?? null,
+        nativeDeviceName: p.nativeDeviceName ?? null,
         nativeWidth: p.nativeWidth ?? 1280,
         nativeHeight: p.nativeHeight ?? 720,
         nativeFps: p.nativeFps ?? 30,
@@ -215,6 +221,7 @@ function savePrefs(): void {
         rtspTransport: s.rtspTransport,
         rtspConnections: s.rtspConnections,
         nativeDevice: s.nativeDevice,
+        nativeDeviceName: s.nativeDeviceName,
         nativeWidth: s.nativeSel.width,
         nativeHeight: s.nativeSel.height,
         nativeFps: s.nativeSel.fps,
@@ -243,6 +250,7 @@ const INITIAL: VideoState = {
   cameraFps: boot.cameraFps,
   nativeDevices: [],
   nativeDevice: boot.nativeDevice,
+  nativeDeviceName: boot.nativeDeviceName,
   nativeModes: [],
   nativeSel: {
     width: boot.nativeWidth,
@@ -454,22 +462,45 @@ export async function enumerateVideoDevices(): Promise<void> {
   }
 }
 
-/** Enumerate native capture devices via the Rust backend (V4L2/DirectShow/AVFoundation). */
+/** Re-resolve the persisted native device against a fresh enumeration.
+ *
+ *  Device ids are only stable up to a point: AVFoundation hands out a running **index** (`"0"`, `"1"`)
+ *  and V4L2 a `/dev/videoN` path — both renumber when hardware is re-plugged or the machine reboots, so
+ *  a saved id can silently denote a *different* camera. Checking "does the id still exist" (the old
+ *  behaviour) can't see that. The saved name is the tie-breaker: keep the id while it still names the
+ *  same device, otherwise follow the name to its new id, and only fall back to the first device when
+ *  neither matches. */
+function resolveNativeDevice(
+  devices: NativeDevice[],
+  id: string | null,
+  name: string | null,
+): NativeDevice | null {
+  if (devices.length === 0) return null;
+  const byId = id ? devices.find((d) => d.id === id) : undefined;
+  if (byId && (!name || byId.name === name)) return byId;
+  const byName = name ? devices.find((d) => d.name === name) : undefined;
+  return byName ?? byId ?? devices[0];
+}
+
+/** Enumerate native capture devices via the Rust backend (V4L2/DirectShow/AVFoundation), then repair
+ *  the persisted selection against the fresh list (see `resolveNativeDevice`). */
 export async function enumerateNativeDevices(): Promise<void> {
   try {
     const devices = await invoke<NativeDevice[]>('video_list_native_devices');
     patch({ nativeDevices: devices });
-    // Auto-select + probe the first device if none selected yet, else (re)probe the current one; drop
-    // a stale selection.
-    const sel = get(videoState).nativeDevice;
-    if (devices.length > 0) {
-      if (!sel || !devices.some((d) => d.id === sel)) {
-        await setNativeDevice(devices[0].id);
-      } else {
-        await probeNativeDevice(sel);
-      }
-    } else if (sel) {
-      patch({ nativeDevice: null, nativeModes: [] });
+    const st = get(videoState);
+    const want = resolveNativeDevice(devices, st.nativeDevice, st.nativeDeviceName);
+    if (!want) {
+      if (st.nativeDevice) patch({ nativeDevice: null, nativeDeviceName: null, nativeModes: [] });
+      return;
+    }
+    if (want.id !== st.nativeDevice) {
+      // Genuinely a different device (first run, hardware swapped, or the id moved) → full switch.
+      await setNativeDevice(want.id);
+    } else {
+      // Same device: only backfill the name (nothing to restart) and refresh its modes.
+      if (want.name !== st.nativeDeviceName) patch({ nativeDeviceName: want.name });
+      await probeNativeDevice(want.id);
     }
   } catch {
     // Native capture not available (no ffmpeg / unsupported platform) — that's fine.
@@ -942,9 +973,11 @@ export async function selectRtspConnection(id: string): Promise<void> {
   await startRtsp();
 }
 
-/** Switch native device: probe it, repair the selection, restart if live. */
+/** Switch native device: probe it, repair the selection, restart if live. The device *name* is stored
+ *  alongside the id so an unstable id (AVFoundation index / `/dev/videoN`) can be re-resolved later. */
 export async function setNativeDevice(id: string | null): Promise<void> {
-  patch({ nativeDevice: id });
+  const name = id ? (get(videoState).nativeDevices.find((d) => d.id === id)?.name ?? null) : null;
+  patch({ nativeDevice: id, nativeDeviceName: name });
   if (id) await probeNativeDevice(id);
   else patch({ nativeModes: [] });
   savePrefs();
@@ -1076,6 +1109,9 @@ export async function enterPiP(): Promise<void> {
   }
 }
 
+/** Delay before auto-starting the Linux `camera` source, so the UI paints first (see `initVideo`). */
+const LINUX_CAMERA_AUTOSTART_DELAY_MS = 1200;
+
 /**
  * App-startup hook: enumerate devices and, if video was running at last close,
  * auto-start it with the persisted settings (device falls back to default if the
@@ -1087,5 +1123,16 @@ export async function initVideo(): Promise<void> {
   // symptom the native/MJPEG path was meant to avoid). Only the `camera` source needs this list, and
   // it's enumerated lazily when the panel shows the camera dropdown. Windows/macOS enumerate fast.
   if (mediaDevicesAvailable() && !isLinux) await enumerateVideoDevices();
-  if (boot.enabled) await startActive();
+  if (!boot.enabled) return;
+
+  // Same stack, second entry point: on Linux the `camera` source's getUserMedia can stall the WebView
+  // process just like the enumeration did, and auto-starting it inline would do that *before the app
+  // has painted* — a blank window for half a minute. Skipping the enumeration alone didn't close that.
+  // Deferring past first paint can't prevent a stall inside WebKit, but it does mean the user gets a
+  // running, usable app either way. `native` and `rtsp` never touch that stack, so they start inline.
+  if (isLinux && get(videoState).kind === 'camera') {
+    setTimeout(() => void startActive(), LINUX_CAMERA_AUTOSTART_DELAY_MS);
+    return;
+  }
+  await startActive();
 }

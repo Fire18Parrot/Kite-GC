@@ -180,14 +180,18 @@
     }
   }
 
-  // Measured (real) frame rate via requestVideoFrameCallback.
+  // Measured (real) frame rate via requestVideoFrameCallback. The live flag goes through a $derived
+  // for the same reason as the enumeration above: reading `$videoState` inside the effect would make it
+  // depend on the whole store, so every unrelated patch (each reconnect-attempt tick, every widget-rect
+  // update) cancelled and re-registered the frame callback — resetting the counter each time.
   let measuredFps = $state(0);
+  const feedLive = $derived($videoState.status === 'live');
   $effect(() => {
     const el = videoEl as (HTMLVideoElement & {
       requestVideoFrameCallback?: (cb: (now: number) => void) => number;
       cancelVideoFrameCallback?: (h: number) => void;
     }) | null;
-    if (!el || $videoState.status !== 'live' || !el.requestVideoFrameCallback) {
+    if (!el || !feedLive || !el.requestVideoFrameCallback) {
       measuredFps = 0;
       return;
     }

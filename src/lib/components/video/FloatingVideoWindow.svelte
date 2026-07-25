@@ -191,8 +191,13 @@
     if (nearLeft && nearBottom) setFloatSnapped(true);
   }
 
+  // Narrow $derived, deliberately not a raw `$videoState.floating` read inside the effect: that would
+  // tie the effect to the WHOLE video store, and the handlers below write to it (setFloatPos /
+  // setFloatSnapped) — so all seven window listeners were torn down and re-registered on every single
+  // pointermove of a drag (and on every unrelated store patch, e.g. a reconnect-attempt tick).
+  const gestureCapture = $derived($videoState.floating && mapHere);
   $effect(() => {
-    if (!$videoState.floating || !mapHere) return;
+    if (!gestureCapture) return;
     const mid = (t: TouchList) => ({
       x: (t[0].clientX + t[1].clientX) / 2,
       y: (t[0].clientY + t[1].clientY) / 2,

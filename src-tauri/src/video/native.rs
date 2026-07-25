@@ -98,8 +98,17 @@ pub fn probe(id: &str) -> Vec<CaptureMode> {
     }
     #[cfg(target_os = "windows")]
     {
-        let arg = format!("video={id}");
-        run_ffmpeg_stderr(&["-hide_banner", "-f", "dshow", "-list_options", "true", "-i", &arg])
+        let (dev_name, dev_num) = dshow_split_id(id);
+        let arg = format!("video={dev_name}");
+        let num = dev_num.map(|n| n.to_string());
+        let mut args: Vec<&str> = vec!["-hide_banner", "-f", "dshow", "-list_options", "true"];
+        if let Some(n) = num.as_deref() {
+            args.push("-video_device_number");
+            args.push(n);
+        }
+        args.push("-i");
+        args.push(&arg);
+        run_ffmpeg_stderr(&args)
             .map(|s| parse_dshow_modes(&s))
             .unwrap_or_default()
     }
@@ -134,7 +143,13 @@ pub fn input_args(spec: &CaptureSpec) -> Vec<String> {
     }
     #[cfg(target_os = "windows")]
     {
+        let (dev_name, dev_num) = dshow_split_id(&spec.id);
         let mut a = vec!["-f".into(), "dshow".into()];
+        if let Some(n) = dev_num {
+            // Disambiguate identical friendly names (see `parse_dshow_devices`). Input option → before -i.
+            a.push("-video_device_number".into());
+            a.push(n.to_string());
+        }
         a.push("-framerate".into());
         a.push(fps);
         a.push("-video_size".into());
@@ -155,7 +170,7 @@ pub fn input_args(spec: &CaptureSpec) -> Vec<String> {
             }
         }
         a.push("-i".into());
-        a.push(format!("video={}", spec.id));
+        a.push(format!("video={dev_name}"));
         a
     }
     #[cfg(target_os = "macos")]
@@ -236,9 +251,16 @@ fn run_ffmpeg_stderr(args: &[&str]) -> Option<String> {
 // ── Parsers (pure; unit-tested cross-platform) ────────────────────────
 
 /// Parse `ffmpeg -f dshow -list_devices true` stderr into video devices (audio devices skipped).
+///
+/// DirectShow addresses a device by its friendly name, so two identical capture cards are literally
+/// indistinguishable — both listed as e.g. "USB Video", and `-i video=USB Video` always opens the
+/// first. ffmpeg's way out is `-video_device_number N` (0-based, "for devices with the same name"), so
+/// the 2nd, 3rd … occurrence gets its id tagged `<name>#N` (decoded again by `dshow_split_id`) and its
+/// label numbered, which also stops the dropdown from showing two identical rows.
 #[allow(dead_code)]
 fn parse_dshow_devices(stderr: &str) -> Vec<NativeDevice> {
-    let mut out = Vec::new();
+    let mut out: Vec<NativeDevice> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     let mut in_video = false;
     for line in stderr.lines() {
         if line.contains("DirectShow video devices") {
@@ -262,7 +284,16 @@ fn parse_dshow_devices(stderr: &str) -> Vec<NativeDevice> {
                 in_video
             };
             if is_video && !name.is_empty() {
-                out.push(NativeDevice { id: name.clone(), name });
+                let n = seen.iter().filter(|s| **s == name).count();
+                seen.push(name.clone());
+                if n == 0 {
+                    out.push(NativeDevice { id: name.clone(), name });
+                } else {
+                    out.push(NativeDevice {
+                        id: format!("{name}#{n}"),
+                        name: format!("{name} ({})", n + 1),
+                    });
+                }
             }
         }
     }
@@ -465,6 +496,23 @@ fn v4l2_input_format(codec: &str) -> String {
     }
 }
 
+/// Split a DirectShow device id back into `(friendly name, device number)` — the inverse of the
+/// duplicate tagging in `parse_dshow_devices`. Untagged ids (the common case, and every id persisted
+/// before the tagging existed) come back unchanged with no number.
+#[allow(dead_code)]
+fn dshow_split_id(id: &str) -> (String, Option<u32>) {
+    if let Some((base, idx)) = id.rsplit_once('#') {
+        // Only a non-empty base + a pure number is a tag; a device genuinely named "…#3" is unheard of,
+        // and the tag is only ever emitted for a repeated name in the first place.
+        if !base.is_empty() {
+            if let Ok(n) = idx.parse::<u32>() {
+                return (base.to_string(), Some(n));
+            }
+        }
+    }
+    (id.to_string(), None)
+}
+
 /// Map our normalized codec back to a DirectShow `-pixel_format` token.
 #[allow(dead_code)]
 fn dshow_pixfmt(codec: &str) -> String {
@@ -491,6 +539,29 @@ mod tests {
         assert_eq!(d.len(), 2);
         assert_eq!(d[0].name, "Integrated Camera");
         assert_eq!(d[1].id, "USB Video");
+    }
+
+    #[test]
+    fn dshow_duplicate_names_get_a_device_number() {
+        let s = "\
+[dshow @ 0x1] DirectShow video devices
+[dshow @ 0x1]  \"USB Video\"
+[dshow @ 0x1]  \"USB Video\"
+[dshow @ 0x1]  \"Integrated Camera\"";
+        let d = parse_dshow_devices(s);
+        assert_eq!(d.len(), 3);
+        // First keeps the bare name (so ids persisted before the tagging still resolve).
+        assert_eq!((d[0].id.as_str(), d[0].name.as_str()), ("USB Video", "USB Video"));
+        assert_eq!((d[1].id.as_str(), d[1].name.as_str()), ("USB Video#1", "USB Video (2)"));
+        assert_eq!(d[2].id, "Integrated Camera");
+    }
+
+    #[test]
+    fn dshow_id_split() {
+        assert_eq!(dshow_split_id("USB Video"), ("USB Video".to_string(), None));
+        assert_eq!(dshow_split_id("USB Video#1"), ("USB Video".to_string(), Some(1)));
+        // Not a tag: no number after the separator.
+        assert_eq!(dshow_split_id("Cam #A"), ("Cam #A".to_string(), None));
     }
 
     #[test]
