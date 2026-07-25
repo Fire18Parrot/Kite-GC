@@ -279,7 +279,7 @@ impl Go2Rtc {
         // A guaranteed-free WebRTC port: if go2rtc's default (8555) is busy, pion's UDP mux stays nil
         // and any ICE op panics the whole process (go2rtc #1851/#1855). Pin it + advertise the
         // loopback host candidate so same-machine ICE connects directly.
-        let webrtc_port = free_loopback_port()?;
+        let webrtc_port = free_loopback_webrtc_port()?;
         let dir = crate::flightlog::decoder::install_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
         let cfg_path = dir.join("kite-go2rtc.yaml");
@@ -341,7 +341,7 @@ impl Go2Rtc {
             return Err("go2rtc did not become ready on its API port".to_string());
         }
 
-        eprintln!("go2rtc running on 127.0.0.1:{api_port}");
+        log::info!("go2rtc running on 127.0.0.1:{api_port}");
         *guard = Some(Running { child, api_port });
         Ok(api_port)
     }
@@ -359,8 +359,17 @@ impl Go2Rtc {
             std::thread::sleep(Duration::from_millis(300));
             let _ = r.child.kill();
             let _ = r.child.wait();
-            eprintln!("go2rtc stopped (was on :{}).", r.api_port);
+            log::info!("go2rtc stopped (was on :{}).", r.api_port);
         }
+    }
+}
+
+/// Never let a go2rtc outlive the app: it keeps its ffmpeg readers — and therefore the RTSP session on
+/// the remote server — alive until something kills it. Tauri isn't guaranteed to drop managed state on
+/// exit, so this is the backstop; the primary path is the `RunEvent::Exit` hook in `lib.rs`.
+impl Drop for Go2Rtc {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -381,12 +390,30 @@ fn delete_stream_blocking(api_port: u16) {
     }
 }
 
-/// Kill stale ffmpeg readers left over from a previous, no-longer-running go2rtc instance (a hard
-/// app exit orphans them — go2rtc's children outlive it). They keep consuming the remote RTSP
-/// server. Matched narrowly by command line: go2rtc readers publish to `rtsp://127.0.0.1:<port>/kite`,
-/// which no other ffmpeg we spawn (MJPEG server, probes) or a user's own ffmpeg ever has. Called
-/// only on the fresh-spawn path, where by definition none of OUR readers can be legitimate.
+/// Kill ffmpeg readers left over from a previous, no-longer-running go2rtc instance (a hard app exit
+/// orphans them — go2rtc's children outlive it). They keep consuming the remote RTSP server.
+///
+/// Readers are identified by their publish target (`rtsp://127.0.0.1:<port>/kite`), which no other
+/// ffmpeg we spawn (MJPEG server, device probes) and no user ffmpeg ever has. Crucially the port tells
+/// us **whose** reader it is: if something is still listening there, the owning go2rtc is alive — a
+/// second Kite instance, or a dev build running beside the installed one — and killing its reader
+/// would black out that instance's video. The old blanket `pkill`/`Stop-Process` did exactly that.
+/// So: enumerate, and only kill readers whose go2rtc is gone.
 fn kill_stale_readers() {
+    let Some(listing) = list_ffmpeg_processes() else { return };
+    for (pid, port) in parse_reader_candidates(&listing) {
+        let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok() {
+            log::debug!("[video] ffmpeg reader pid {pid} left alone — its go2rtc on :{port} is alive");
+            continue;
+        }
+        log::warn!("[video] killing orphaned ffmpeg reader pid {pid} (go2rtc on :{port} is gone)");
+        kill_pid(pid);
+    }
+}
+
+/// `pid <command line>` for every running ffmpeg, or None if the process listing isn't available.
+fn list_ffmpeg_processes() -> Option<String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -394,20 +421,81 @@ fn kill_stale_readers() {
         cmd.args([
             "-NoProfile",
             "-Command",
-            "Get-CimInstance Win32_Process -Filter \"Name='ffmpeg.exe'\" | Where-Object { $_.CommandLine -match '127\\.0\\.0\\.1:\\d+/kite' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+            "Get-CimInstance Win32_Process -Filter \"Name='ffmpeg.exe'\" | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }",
         ]);
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        cmd.stdin(Stdio::null()).stderr(Stdio::null());
+        let out = cmd.output().ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+    #[cfg(not(windows))]
+    {
+        // `-ww` = don't truncate the command line (BSD/macOS ps clips to the terminal width).
+        let out = Command::new("ps")
+            .args(["-ww", "-eo", "pid=,args="])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+/// Terminate a process by pid (best-effort).
+fn kill_pid(pid: u32) {
+    let pid_s = pid.to_string();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid_s, "/F"]);
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         cmd.stdout(Stdio::null()).stderr(Stdio::null()).stdin(Stdio::null());
         let _ = cmd.status();
     }
     #[cfg(not(windows))]
     {
-        let _ = Command::new("pkill")
-            .args(["-f", r"ffmpeg.*rtsp://127\.0\.0\.1:[0-9]+/kite"])
+        let _ = Command::new("kill")
+            .args(["-9", &pid_s])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
     }
+}
+
+/// Parse a `pid <command line>` listing into `(pid, go2rtc rtsp port)` for every ffmpeg that publishes
+/// a go2rtc reader stream. Pure (unit-tested) — the per-OS part is only the listing itself.
+fn parse_reader_candidates(listing: &str) -> Vec<(u32, u16)> {
+    let mut out = Vec::new();
+    for line in listing.lines() {
+        let line = line.trim_start();
+        let Some((pid, rest)) = line.split_once(char::is_whitespace) else { continue };
+        let Ok(pid) = pid.parse::<u32>() else { continue };
+        if !rest.contains("ffmpeg") {
+            continue;
+        }
+        if let Some(port) = reader_target_port(rest) {
+            out.push((pid, port));
+        }
+    }
+    out
+}
+
+/// The go2rtc RTSP port a reader publishes to, from `rtsp://127.0.0.1:<port>/kite…` in its command
+/// line. None if this ffmpeg isn't one of our readers.
+fn reader_target_port(cmdline: &str) -> Option<u16> {
+    const HOST: &str = "127.0.0.1:";
+    let mut from = 0;
+    while let Some(rel) = cmdline[from..].find(HOST) {
+        let start = from + rel + HOST.len();
+        let digits: String = cmdline[start..].chars().take_while(char::is_ascii_digit).collect();
+        let after = start + digits.len();
+        if !digits.is_empty() && cmdline[after..].starts_with("/kite") {
+            return digits.parse().ok();
+        }
+        from = start;
+    }
+    None
 }
 
 /// Grab a free loopback TCP port by binding to :0 and reading it back.
@@ -418,4 +506,69 @@ fn free_loopback_port() -> Result<u16, String> {
         .local_addr()
         .map(|a| a.port())
         .map_err(|e| format!("Cannot read allocated port: {e}"))
+}
+
+/// Grab a loopback port that is free for **both UDP and TCP** — go2rtc's WebRTC listener binds UDP for
+/// the ICE mux and also accepts TCP candidates on the same port. Probing only TCP (as this used to)
+/// can hand out a UDP-occupied port, which is exactly the case that leaves pion's UDP mux nil and
+/// panics go2rtc on the first ICE operation. UDP first (that's the binding that must succeed), then
+/// TCP verified while the UDP socket is still held.
+fn free_loopback_webrtc_port() -> Result<u16, String> {
+    let mut last = String::new();
+    for _ in 0..10 {
+        let udp = std::net::UdpSocket::bind(("127.0.0.1", 0))
+            .map_err(|e| format!("Cannot allocate a WebRTC port: {e}"))?;
+        let port = udp
+            .local_addr()
+            .map_err(|e| format!("Cannot read allocated WebRTC port: {e}"))?
+            .port();
+        match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(_) => return Ok(port),
+            Err(e) => last = e.to_string(),
+        }
+    }
+    Err(format!("Cannot find a port free for both UDP and TCP: {last}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reader_candidates_from_ps_listing() {
+        // Realistic `ps -ww -eo pid=,args=` output: one go2rtc reader, one native-capture ffmpeg
+        // (MJPEG server — must NOT match), one unrelated user ffmpeg, one non-ffmpeg process.
+        let listing = "\
+  1234 /home/u/.local/share/kite-gc/bin/ffmpeg -hide_banner -i rtsp://cam.local:8554/cam -c copy -f rtsp rtsp://127.0.0.1:41233/kite?video
+  1235 ffmpeg -f v4l2 -framerate 30 -video_size 1280x720 -i /dev/video0 -c:v mjpeg -f mpjpeg -
+  1236 ffmpeg -i movie.mp4 -c copy out.mkv
+  9999 /usr/bin/go2rtc -config /home/u/.local/share/kite-gc/bin/kite-go2rtc.yaml";
+        assert_eq!(parse_reader_candidates(listing), vec![(1234, 41233)]);
+    }
+
+    #[test]
+    fn reader_candidates_from_windows_listing() {
+        // Raw string: real Win32 command lines carry quotes and backslashes. CRLF line ends too, since
+        // the listing comes back from PowerShell.
+        let listing = concat!(
+            r#"4312 "C:\Users\u\AppData\Roaming\kite-gc\bin\ffmpeg.exe" -i rtsp://10.0.0.5:8554/cam -c copy -f rtsp rtsp://127.0.0.1:52001/kite"#,
+            "\r\n",
+            r#"4400 ffmpeg.exe -f dshow -i video=Cam -f mpjpeg -"#,
+            "\r\n",
+        );
+        assert_eq!(parse_reader_candidates(listing), vec![(4312, 52001)]);
+    }
+
+    #[test]
+    fn target_port_needs_the_kite_path() {
+        assert_eq!(reader_target_port("-f rtsp rtsp://127.0.0.1:8554/kite"), Some(8554));
+        // A source that merely happens to be on loopback is not a reader target.
+        assert_eq!(reader_target_port("-i rtsp://127.0.0.1:8554/cam -f mpjpeg -"), None);
+        // The API base URL appears first; the reader target later on the same line.
+        assert_eq!(
+            reader_target_port("--api http://127.0.0.1:1984/ -f rtsp rtsp://127.0.0.1:41233/kite?video"),
+            Some(41233)
+        );
+        assert_eq!(reader_target_port("no loopback here"), None);
+    }
 }

@@ -777,6 +777,11 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
  *  Linux HDMI dongles). */
 export async function startNative(): Promise<void> {
   stopTracks();
+  // Release a previous MJPEG capture FIRST. Its ffmpeg holds the device exclusively (DirectShow
+  // always, V4L2 usually), so leaving it running made the getUserMedia attempt below fail with
+  // NotReadableError — which fell back to MJPEG again, permanently. Changing resolution while on the
+  // fallback path could therefore never return to the clean hardware <video> path.
+  await stopNativeMjpeg();
   const st = get(videoState);
   const id = st.nativeDevice;
   if (!id) {

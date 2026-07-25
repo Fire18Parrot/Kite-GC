@@ -3,6 +3,11 @@
 
 //! Video commands — the go2rtc RTSP→WebRTC engine + its ffmpeg fallback dependency.
 //! See docs/active/RTSP_VIDEO.md.
+//!
+//! **Threading:** every command here that spawns a helper process, waits on one, or tears one down is
+//! marked `#[tauri::command(async)]`. Tauri runs plain `fn` commands on the **main thread**, so a
+//! device enumeration behind a wedged capture driver (or a `--version` call on a binary Gatekeeper /
+//! Defender is still scanning) would freeze the whole UI. Only trivially-cheap commands stay sync.
 
 use tauri::{AppHandle, Emitter, State};
 
@@ -13,7 +18,7 @@ const STREAM_NAME: &str = "kite";
 
 /// ffmpeg version string (`ffmpeg -version` first line), or null if it isn't installed yet. ffmpeg is
 /// the fallback RTSP reader for go2rtc (sources its native client can't read), not always required.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn video_ffmpeg_status() -> Option<String> {
     ffmpeg::version()
 }
@@ -36,7 +41,7 @@ pub async fn video_ffmpeg_download(app_handle: AppHandle) -> Result<String, Stri
 // ── go2rtc / WebRTC (the live RTSP path) ─────────────────────────────
 
 /// go2rtc presence string (version/installed), or null if not installed yet.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn video_go2rtc_status() -> Option<String> {
     go2rtc::status()
 }
@@ -126,8 +131,9 @@ pub async fn video_webrtc_offer(sdp: String, engine: State<'_, Go2Rtc>) -> Resul
         .ok_or("go2rtc answer has no SDP".to_string())
 }
 
-/// Stop the WebRTC stream (kills the local go2rtc process). Idempotent.
-#[tauri::command]
+/// Stop the WebRTC stream (kills the local go2rtc process). Idempotent. Async: the graceful teardown
+/// does a blocking DELETE + a settle delay before the kill (~1 s worst case).
+#[tauri::command(async)]
 pub fn video_webrtc_stop(engine: State<'_, Go2Rtc>) -> Result<(), String> {
     engine.stop();
     Ok(())
@@ -146,7 +152,7 @@ pub fn video_go2rtc_port(engine: State<'_, Go2Rtc>) -> Option<u16> {
 /// Enumerate native capture devices (USB/HDMI dongles etc.) for the "Advanced" source. Uses the OS
 /// hardware layer via ffmpeg (Linux V4L2, Windows DirectShow, macOS AVFoundation). Empty on
 /// unsupported platforms / when ffmpeg is missing.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn video_list_native_devices() -> Vec<native::NativeDevice> {
     native::list_devices()
 }
@@ -154,7 +160,7 @@ pub fn video_list_native_devices() -> Vec<native::NativeDevice> {
 /// Probe a device's supported capture modes (codec + resolution range + fps range). Best-effort: V4L2
 /// reports no framerate (0 = unknown) and AVFoundation returns nothing — the frontend then falls back
 /// to the curated FPV catalog.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn video_probe_device(id: String) -> Vec<native::CaptureMode> {
     native::probe(&id)
 }
@@ -162,7 +168,10 @@ pub fn video_probe_device(id: String) -> Vec<native::CaptureMode> {
 /// Start the embedded MJPEG HTTP server capturing from a native device with the chosen mode
 /// (codec/resolution/framerate). MJPEG input is stream-copied; anything else is transcoded. Returns
 /// the local URL (`http://127.0.0.1:PORT/`), killing any previous server first.
-#[tauri::command]
+///
+/// Only returns `Ok` once the capture actually produced its first bytes — a device that rejects the
+/// requested mode used to leave the UI showing "live" over a black frame (see `MjpegServer::start`).
+#[tauri::command(async)]
 pub fn video_native_mjpeg_start(
     id: String,
     codec: String,
@@ -176,8 +185,9 @@ pub fn video_native_mjpeg_start(
     Ok(format!("http://127.0.0.1:{port}/"))
 }
 
-/// Stop the embedded MJPEG server if running.
-#[tauri::command]
+/// Stop the embedded MJPEG server if running. Async: kills ffmpeg and joins the broadcast threads,
+/// which can sit in a blocking client write for up to `CLIENT_WRITE_TIMEOUT`.
+#[tauri::command(async)]
 pub fn video_native_mjpeg_stop(mjpeg: State<'_, crate::video::MjpegServer>) -> Result<(), String> {
     mjpeg.stop();
     Ok(())

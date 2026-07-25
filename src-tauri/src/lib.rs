@@ -451,6 +451,17 @@ pub fn run() {
             rally_read_all,
             rally_write_all,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Kite Ground Control");
+        .build(tauri::generate_context!())
+        .expect("error while running Kite Ground Control")
+        .run(|app, event| {
+            // Tauri tears the process down without dropping managed state, so the video helpers must
+            // be stopped here. A surviving go2rtc keeps its spawned ffmpeg readers — and with them the
+            // RTSP session on the remote server — alive indefinitely (this is what wedged the UAV-Link
+            // Pi's shared media), and a surviving capture ffmpeg keeps holding the camera.
+            if matches!(event, tauri::RunEvent::Exit) {
+                use tauri::Manager;
+                app.state::<Go2Rtc>().stop();
+                app.state::<MjpegServer>().stop();
+            }
+        });
 }

@@ -16,7 +16,14 @@
 //! and AVFoundation listings are too terse to parse reliably (probe returns empty → full catalog).
 
 use serde::Serialize;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+/// Hard cap on a device-enumeration / probe call. ffmpeg normally answers in well under a second;
+/// a wedged capture driver (DirectShow and AVFoundation both do this) can block **forever**, and this
+/// used to be an unbounded `Command::output()`. Bounded + killed, so a bad device costs one slow
+/// dropdown instead of a stuck helper process.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// A discovered native capture device. `id` is what ffmpeg addresses the device by on this OS:
 /// V4L2 = `/dev/videoN`, DirectShow = the friendly name, AVFoundation = the numeric index.
@@ -180,18 +187,50 @@ pub fn needs_transcode(codec: &str) -> bool {
 // ── ffmpeg invocation ─────────────────────────────────────────────────
 
 /// Run ffmpeg with the given args and return its **stderr** (ffmpeg prints device/format listings and
-/// diagnostics there). Returns None if ffmpeg isn't installed or couldn't be launched.
+/// diagnostics there). Returns None if ffmpeg isn't installed, couldn't be launched, or didn't finish
+/// within `QUERY_TIMEOUT` — in which case the child is killed rather than left behind.
+///
+/// The read happens on a helper thread so the wait can be bounded (`std::process` has no
+/// wait-with-timeout): stderr reaches EOF when ffmpeg exits, so a value on the channel means "done".
 fn run_ffmpeg_stderr(args: &[&str]) -> Option<String> {
     let bin = super::ffmpeg::find_ffmpeg()?;
     let mut cmd = Command::new(&bin);
-    cmd.args(args);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null()) // listings go to stderr; discard stdout so it can't fill a pipe
+        .stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW — don't flash a console
     }
-    let out = cmd.output().ok()?;
-    Some(String::from_utf8_lossy(&out.stderr).into_owned())
+    let mut child = cmd.spawn().ok()?;
+    let mut stderr = child.stderr.take()?;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+    });
+
+    match rx.recv_timeout(QUERY_TIMEOUT) {
+        Ok(text) => {
+            let _ = child.wait();
+            Some(text)
+        }
+        Err(_) => {
+            log::warn!(
+                "[video] ffmpeg device query timed out after {}s — killing it (args: {:?})",
+                QUERY_TIMEOUT.as_secs(),
+                args
+            );
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+    }
 }
 
 // ── Parsers (pure; unit-tested cross-platform) ────────────────────────
