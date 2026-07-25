@@ -11,9 +11,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::Value;
-
-const RELEASES_API: &str = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest";
+const REPO: &str = "BtbN/FFmpeg-Builds";
 const RELEASES_PAGE: &str = "https://github.com/BtbN/FFmpeg-Builds/releases";
 const HTTP_USER_AGENT: &str = "Kite-GC ffmpeg-fetch";
 
@@ -106,42 +104,17 @@ fn manual_install_msg() -> String {
 pub async fn download<F: FnMut(u8, &str)>(mut report: F) -> Result<PathBuf, String> {
     let (want_substr, want_ext) = asset_match().ok_or_else(manual_install_msg)?;
 
-    report(5, "Querying latest ffmpeg release");
+    // Self-contained static GPL build for this platform (ffmpeg-master-latest-win64-gpl.zip /
+    // -linux64-gpl.tar.xz / -linuxarm64-gpl.tar.xz), NOT the -shared variant (needs separate libs).
+    // BtbN's names are fixed across releases, so this resolves through the CDN path instead of the
+    // rate-limited REST API (which 403s for everyone behind a shared IP — see `crate::github_release`).
+    let asset_name = format!("ffmpeg-master-latest-{want_substr}-gpl{want_ext}");
+    let url = crate::github_release::latest_asset_url(REPO, &asset_name);
+
     let client = reqwest::Client::builder()
         .user_agent(HTTP_USER_AGENT)
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
-
-    let release: Value = client
-        .get(RELEASES_API)
-        .send()
-        .await
-        .map_err(|e| format!("Release query failed: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Release query failed: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("Release JSON parse failed: {e}"))?;
-
-    let assets = release
-        .get("assets")
-        .and_then(Value::as_array)
-        .ok_or("Latest release has no downloadable assets")?;
-
-    // Self-contained static GPL build for this platform (e.g. ffmpeg-master-latest-win64-gpl.zip /
-    // -linux64-gpl.tar.xz / -linuxarm64-gpl.tar.xz), NOT the -shared variant (needs separate libs).
-    let (asset_name, url) = assets
-        .iter()
-        .find_map(|a| {
-            let name = a.get("name").and_then(Value::as_str)?;
-            let url = a.get("browser_download_url").and_then(Value::as_str)?;
-            (name.contains(want_substr)
-                && name.contains("-gpl")
-                && !name.contains("shared")
-                && name.ends_with(want_ext))
-            .then(|| (name.to_string(), url.to_string()))
-        })
-        .ok_or_else(|| format!("No {want_substr} GPL ffmpeg {want_ext} asset found in the latest release"))?;
 
     report(25, "Downloading ffmpeg (~80 MB)");
     let bytes = client

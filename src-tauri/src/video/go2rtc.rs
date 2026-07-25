@@ -17,9 +17,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
-
-const RELEASES_API: &str = "https://api.github.com/repos/AlexxIT/go2rtc/releases/latest";
+const REPO: &str = "AlexxIT/go2rtc";
 const RELEASES_PAGE: &str = "https://github.com/AlexxIT/go2rtc/releases";
 const HTTP_USER_AGENT: &str = "Kite-GC go2rtc-fetch";
 
@@ -117,39 +115,18 @@ fn manual_install_msg() -> String {
 }
 
 /// Download go2rtc into the app-data `bin/` dir (Windows + Linux x86_64/arm64 + macOS). Returns the path.
+///
+/// Resolved **without** the GitHub REST API: go2rtc's asset names are fixed per OS+arch, so
+/// `releases/latest/download/<name>` goes straight to the newest build. The API is rate-limited per IP
+/// and 403s for everyone behind a shared address — see `crate::github_release`.
 pub async fn download<F: FnMut(u8, &str)>(mut report: F) -> Result<PathBuf, String> {
     let asset_name = release_asset_name().ok_or_else(manual_install_msg)?;
+    let url = crate::github_release::latest_asset_url(REPO, asset_name);
 
-    report(5, "Querying latest go2rtc release");
     let client = reqwest::Client::builder()
         .user_agent(HTTP_USER_AGENT)
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
-
-    let release: Value = client
-        .get(RELEASES_API)
-        .send()
-        .await
-        .map_err(|e| format!("Release query failed: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Release query failed: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("Release JSON parse failed: {e}"))?;
-
-    let assets = release
-        .get("assets")
-        .and_then(Value::as_array)
-        .ok_or("Latest release has no downloadable assets")?;
-
-    let url = assets
-        .iter()
-        .find_map(|a| {
-            let name = a.get("name").and_then(Value::as_str)?;
-            let url = a.get("browser_download_url").and_then(Value::as_str)?;
-            (name == asset_name).then(|| url.to_string())
-        })
-        .ok_or_else(|| format!("No '{asset_name}' asset found in the latest go2rtc release"))?;
 
     report(25, "Downloading go2rtc");
     let bytes = client

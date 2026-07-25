@@ -30,6 +30,7 @@
     updateRtspConnection,
     removeRtspConnection,
     selectRtspConnection,
+    reportMjpegError,
     type RtspTransport,
     toggleFloating,
     enterPiP,
@@ -255,6 +256,7 @@
           alt="Live video"
           class:mirror={$videoState.mirror}
           onload={mjpegFrameTick}
+          onerror={reportMjpegError}
         />
       {:else}
         <!-- svelte-ignore a11y_media_has_caption -->

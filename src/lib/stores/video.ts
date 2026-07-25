@@ -19,6 +19,7 @@
 
 import { writable, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
+import { t } from 'svelte-i18n';
 import { isLinux } from '$lib/platform';
 import {
   type NativeDevice,
@@ -797,6 +798,24 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
     console.warn('[video] RTSP connect failed — reconnecting', err);
     scheduleRtspReconnect();
   }
+}
+
+/** A sink's MJPEG `<img>` failed to load. Unlike the WebRTC path there are no stats to poll on a
+ *  multipart feed — the element's own `error` event is the ONLY signal that it died, or that this
+ *  WebView can't render `multipart/x-mixed-replace` at all. Without this the feed just showed the
+ *  WebView's broken-image placeholder while the app still claimed to be `live` (reported on Debian /
+ *  WebKitGTK). RTSP re-enters the reconnect loop; native capture has no remote to retry, so it reports
+ *  an error. Idempotent — every sink fires it, and the first one to arrive does the work. */
+export function reportMjpegError(): void {
+  const st = get(videoState);
+  if (!st.enabled || !st.mjpegUrl) return;
+  if (st.kind === 'rtsp') {
+    console.warn('[video] MJPEG image failed to load — reconnecting');
+    scheduleRtspReconnect();
+    return;
+  }
+  console.warn('[video] MJPEG image failed to load');
+  patch({ status: 'error', mjpegUrl: null, error: get(t)('video.mjpegLoadFailed') });
 }
 
 /** Open a native capture device with device-verified resolution/framerate. Primary path: getUserMedia

@@ -26,6 +26,7 @@
     setFloatHeightFrac,
     setMapLocation,
     toggleFloating,
+    reportMjpegError,
   } from '$lib/stores/video';
   import VideoReconnectOverlay from '$lib/components/video/VideoReconnectOverlay.svelte';
 
@@ -272,7 +273,7 @@
         {#if $videoState.status === 'live' && $videoState.mjpegUrl}
           <!-- Native / MJPEG feed: an <img> multipart stream (no MediaStream). -->
           <!-- svelte-ignore a11y_missing_attribute -->
-          <img src={$videoState.mjpegUrl} class:mirror={$videoState.mirror} />
+          <img src={$videoState.mjpegUrl} class:mirror={$videoState.mirror} onerror={reportMjpegError} />
         {:else if $videoState.status === 'live'}
           <!-- svelte-ignore a11y_media_has_caption -->
           <video bind:this={videoEl} autoplay muted playsinline class:mirror={$videoState.mirror}></video>

@@ -6,6 +6,7 @@ mod commands;
 mod debug_mode;
 mod flightlog;
 mod flightmode;
+mod github_release;
 mod hid;
 mod link_stats;
 mod logging;
@@ -105,6 +106,43 @@ use telemetry_forward::{relay_configure, relay_clear, RelayHub};
 /// True when a `.portable` marker file sits next to the executable. Used both to
 /// redirect data (`setup_portable_mode`) and to gate plugins whose storage path we
 /// cannot redirect in portable mode (e.g. window-state on Windows).
+/// Raspberry Pi workaround: force the WebKit framebuffer to be reallocated shortly after start-up.
+///
+/// With GPU acceleration enabled, the Pi's **first** framebuffer allocation is usually broken — the
+/// window shows garbage or a black surface until something makes WebKit allocate a new one. Any size
+/// change does that, so we nudge the window by one pixel and put it straight back; the same workaround
+/// is in use on the maintainer's Pi dashboard project. Cheap and invisible (one pixel, before the user
+/// can interact), but it can only work on a freely-sizable window — a maximized or fullscreen window is
+/// skipped, since `set_size` would fight the window manager.
+#[cfg(target_os = "linux")]
+fn nudge_framebuffer_on_pi(app: &tauri::App) {
+    use tauri::Manager;
+
+    // `/proc/device-tree/model` is the canonical Pi identifier ("Raspberry Pi 5 Model B Rev 1.0"). It's
+    // absent on every non-device-tree machine, so this is a no-op on ordinary Linux desktops.
+    let model = std::fs::read_to_string("/proc/device-tree/model").unwrap_or_default();
+    if !model.contains("Raspberry Pi") {
+        return;
+    }
+    let Some(window) = app.get_webview_window("main") else { return };
+    tauri::async_runtime::spawn(async move {
+        // Let the first frame get as far as it's going to get before forcing the reallocation.
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        if window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false) {
+            log::info!("[gpu] Raspberry Pi framebuffer nudge skipped (window is maximized/fullscreen)");
+            return;
+        }
+        let Ok(size) = window.inner_size() else { return };
+        let bigger = tauri::PhysicalSize::new(size.width, size.height + 1);
+        if window.set_size(bigger).is_err() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let _ = window.set_size(size);
+        log::info!("[gpu] Raspberry Pi framebuffer nudge applied ({}x{})", size.width, size.height);
+    });
+}
+
 pub fn is_portable() -> bool {
     std::env::current_exe()
         .ok()
@@ -240,6 +278,17 @@ pub fn run() {
                         // user controls. (`settings()` returns `Option<WebKitSettings>` in this binding.)
                         if let Some(settings) = WebViewExt::settings(&wv) {
                             settings.set_enable_media_stream(true);
+                            // WebRTC is a SEPARATE switch and it is **off by default** in WebKitGTK
+                            // ≥ 2.38 — without it `RTCPeerConnection` is undefined, the RTSP source
+                            // silently degrades to the MJPEG fallback, and that fallback then depends
+                            // on go2rtc transcoding (and on the WebView rendering multipart images at
+                            // all). Set by NAME rather than through `set_enable_webrtc()`: that setter
+                            // sits behind the crate's `v2_38` feature, which would raise our build-time
+                            // WebKitGTK requirement (CI deliberately builds against ubuntu-22.04). By
+                            // name it is simply a no-op on older runtimes that lack the property.
+                            if settings.find_property("enable-webrtc").is_some() {
+                                settings.set_property("enable-webrtc", true);
+                            }
                         }
                         wv.connect_permission_request(|_wv, req| {
                             if req.downcast_ref::<webkit2gtk::GeolocationPermissionRequest>().is_some()
@@ -253,6 +302,7 @@ pub fn run() {
                         });
                     });
                 }
+                nudge_framebuffer_on_pi(_app);
             }
             Ok(())
         })

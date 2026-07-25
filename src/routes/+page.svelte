@@ -83,7 +83,7 @@
   import WidgetPanel from "$lib/components/WidgetPanel.svelte";
   import { LARGE_BASE_VMIN } from "$lib/config/widgetRegistry";
   import FloatingVideoWindow from "$lib/components/video/FloatingVideoWindow.svelte";
-  import { initVideo, videoState, videoStream, bindVideoEl, setMapLocation, setFloatHeightFrac, setFloatPos, registerPiPElement } from "$lib/stores/video";
+  import { initVideo, videoState, videoStream, bindVideoEl, setMapLocation, setFloatHeightFrac, setFloatPos, registerPiPElement, reportMjpegError } from "$lib/stores/video";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import TerrainAnalysisPanel from "$lib/components/terrain/TerrainAnalysisPanel.svelte";
   import { editMode, replayActive, mission, missionFlags, missionDownload, missionUpload, missionFcInfo, markMissionSynced, loadedMissionId, missionSetWaypoints, launchPoint, hasLocation, toDeg, type Waypoint } from "$lib/stores/mission";
@@ -2573,6 +2573,7 @@
           class:mirror={$videoState.mirror}
           src={$videoState.mjpegUrl}
           ondblclick={() => setMapLocation('main')}
+          onerror={reportMjpegError}
         />
       {:else}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
