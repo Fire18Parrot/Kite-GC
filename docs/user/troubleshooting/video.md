@@ -119,6 +119,26 @@ sustain. Two things are worth knowing:
 Converting a 720p60 stream in software is simply beyond a small machine, and no setting inside Kite
 changes that arithmetic — the picture has to get smaller or slower at the source.
 
+## Linux: the CPU stays busy after I stop the video
+
+If stopping the feed leaves a processor core fully loaded — and it never drops until you quit Kite —
+check which browser engine your system provides. Kite logs it on every start
+(**Settings → Diagnostics**):
+
+```
+[webkit] WebKitGTK 2.50.6 — enable-webrtc set, reads back as true
+```
+
+**A 2.50.x engine has this fault.** It is in the engine, not in Kite: the video helpers shut down
+correctly and drawing stops, but the engine keeps working on something afterwards. Nothing inside
+Kite can switch it off.
+
+WebKitGTK 2.50 is what **Debian 12, Raspberry Pi OS Bookworm and Ubuntu 22.04** ship, and it is the
+reason Kite's Linux downloads are built for newer systems (see
+**[Installation](../getting-started/installation.md)**). Debian 13, Raspberry Pi OS Trixie and Ubuntu
+24.04 carry 2.52, where the engine settles back to idle. **Upgrading the distribution is the fix** —
+reinstalling Kite, or building it yourself, cannot change which engine your system provides.
+
 ## Raspberry Pi: garbled or black window right after start
 
 A known quirk of the Pi's graphics driver: the very first drawing surface is often invalid. Kite detects
