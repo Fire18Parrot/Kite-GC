@@ -39,6 +39,9 @@ pub struct CaptureMode {
     pub max_height: u32,
     pub fps_min: f32,
     pub fps_max: f32,
+    /// Discrete framerates the device reports for this mode (V4L2). Empty when the source only gives a
+    /// range (DirectShow) or no fps at all (the ffmpeg fallback) — the UI then uses `fps_min..fps_max`.
+    pub fps_list: Vec<f32>,
 }
 
 /// A chosen capture configuration, handed to the MJPEG server to build the ffmpeg command.
@@ -57,10 +60,7 @@ pub struct CaptureSpec {
 pub fn list_devices() -> Vec<NativeDevice> {
     #[cfg(target_os = "linux")]
     {
-        crate::video::v4l2::enumerate()
-            .into_iter()
-            .map(|d| NativeDevice { id: d.path, name: d.name })
-            .collect()
+        linux_list_devices()
     }
     #[cfg(target_os = "windows")]
     {
@@ -85,9 +85,7 @@ pub fn list_devices() -> Vec<NativeDevice> {
 pub fn probe(id: &str) -> Vec<CaptureMode> {
     #[cfg(target_os = "linux")]
     {
-        run_ffmpeg_stderr(&["-hide_banner", "-f", "v4l2", "-list_formats", "all", "-i", id])
-            .map(|s| parse_v4l2_modes(&s))
-            .unwrap_or_default()
+        linux_probe(id)
     }
     #[cfg(target_os = "windows")]
     {
@@ -194,6 +192,202 @@ fn run_ffmpeg_stderr(args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
+// ── Linux: rich probing via v4l2-ctl (real fps + colour-node filtering) ────────────────────────
+// ffmpeg's `-list_formats` gives codecs+resolutions but NO framerate, and lists every V4L2 node of a
+// multi-sensor camera (colour + IR + metadata). v4l2-ctl (v4l-utils) reports per-mode framerates and a
+// physical-device grouping, so we prefer it and fall back to the ffmpeg/sysfs path when it isn't
+// installed — video always works, only the fps menu degrades without it.
+
+/// Run `v4l2-ctl <args>`; returns stdout, or None if v4l-utils isn't installed / the call failed.
+#[cfg(target_os = "linux")]
+fn run_v4l2_ctl(args: &[&str]) -> Option<String> {
+    let out = Command::new("v4l2-ctl").args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Enumerate cameras, one colour node per physical device (IR/metadata nodes dropped). Falls back to
+/// the unfiltered sysfs scan when v4l2-ctl is unavailable.
+#[cfg(target_os = "linux")]
+fn linux_list_devices() -> Vec<NativeDevice> {
+    if let Some(out) = run_v4l2_ctl(&["--list-devices"]) {
+        let groups = parse_v4l2ctl_devices(&out);
+        let devices: Vec<NativeDevice> = groups
+            .into_iter()
+            .filter_map(|(name, nodes)| pick_colour_node(&nodes).map(|id| NativeDevice { id, name }))
+            .collect();
+        if !devices.is_empty() {
+            return devices;
+        }
+    }
+    crate::video::v4l2::enumerate()
+        .into_iter()
+        .map(|d| NativeDevice { id: d.path, name: d.name })
+        .collect()
+}
+
+/// Probe a device's modes with real framerates (v4l2-ctl), falling back to the fps-less ffmpeg listing.
+#[cfg(target_os = "linux")]
+fn linux_probe(id: &str) -> Vec<CaptureMode> {
+    if let Some(out) = run_v4l2_ctl(&["-d", id, "--list-formats-ext"]) {
+        let modes = parse_v4l2ctl_modes(&out);
+        if !modes.is_empty() {
+            return modes;
+        }
+    }
+    run_ffmpeg_stderr(&["-hide_banner", "-f", "v4l2", "-list_formats", "all", "-i", id])
+        .map(|s| parse_v4l2_modes(&s))
+        .unwrap_or_default()
+}
+
+/// Of a camera's V4L2 nodes, pick the colour video node: the one scoring highest on colour formats
+/// (MJPEG-capable wins). Metadata nodes (no video formats) and IR nodes (grey-only) score 0 → skipped.
+#[cfg(target_os = "linux")]
+fn pick_colour_node(nodes: &[String]) -> Option<String> {
+    let mut best: Option<(u32, &String)> = None;
+    for node in nodes {
+        let Some(out) = run_v4l2_ctl(&["-d", node, "--list-formats"]) else { continue };
+        let score = colour_score(&out);
+        if score > 0 && best.map_or(true, |(s, _)| score > s) {
+            best = Some((score, node));
+        }
+    }
+    best.map(|(_, n)| n.clone())
+}
+
+// ── Pure parsers/scorers for the v4l2-ctl text (unit-tested) ──────────
+
+/// Score a `v4l2-ctl --list-formats` dump by how colour-webcam-like it is; 0 = not a usable colour node
+/// (metadata node = no formats; IR node = grey-only).
+#[cfg(target_os = "linux")]
+fn colour_score(list_formats: &str) -> u32 {
+    let low = list_formats.to_ascii_lowercase();
+    let mut score = 0;
+    if low.contains("mjpg") || low.contains("mjpeg") {
+        score += 4; // colour webcams expose MJPEG; IR/depth nodes don't
+    }
+    if low.contains("yuyv") {
+        score += 2;
+    }
+    if low.contains("h264") {
+        score += 2;
+    }
+    if low.contains("nv12") || low.contains("rgb") {
+        score += 1;
+    }
+    score
+}
+
+/// Parse `v4l2-ctl --list-devices` into (card-name, [/dev/videoN…]) groups.
+#[cfg(target_os = "linux")]
+fn parse_v4l2ctl_devices(out: &str) -> Vec<(String, Vec<String>)> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for line in out.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.starts_with(char::is_whitespace) {
+            let path = line.trim();
+            if path.starts_with("/dev/video") {
+                if let Some(g) = groups.last_mut() {
+                    g.1.push(path.to_string());
+                }
+            }
+        } else {
+            // Header: "Card Name (usb-…):" — keep the text before " (".
+            let name = line.split(" (").next().unwrap_or(line).trim().trim_end_matches(':').trim();
+            groups.push((name.to_string(), Vec::new()));
+        }
+    }
+    groups
+}
+
+/// Parse `v4l2-ctl --list-formats-ext` into modes (one per codec×discrete-resolution, with real fps).
+#[cfg(target_os = "linux")]
+fn parse_v4l2ctl_modes(out: &str) -> Vec<CaptureMode> {
+    let mut modes = Vec::new();
+    let mut codec = String::new();
+    let (mut w, mut h) = (0u32, 0u32);
+    let mut fps: Vec<f32> = Vec::new();
+
+    for line in out.lines() {
+        let t = line.trim();
+        if t.contains("]:") {
+            if let Some(c) = between_single_quotes(t) {
+                push_mode(&mut modes, &codec, w, h, &fps);
+                codec = c.to_string();
+                w = 0;
+                h = 0;
+                fps.clear();
+                continue;
+            }
+        }
+        if let Some(rest) = t.strip_prefix("Size: Discrete ") {
+            push_mode(&mut modes, &codec, w, h, &fps);
+            match parse_wxh(rest.trim()) {
+                Some((nw, nh)) => {
+                    w = nw;
+                    h = nh;
+                }
+                None => {
+                    w = 0;
+                    h = 0;
+                }
+            }
+            fps.clear();
+            continue;
+        }
+        if t.starts_with("Interval: Discrete") {
+            if let Some(f) = t
+                .split('(')
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .and_then(|s| s.parse::<f32>().ok())
+            {
+                fps.push(f);
+            }
+        }
+    }
+    push_mode(&mut modes, &codec, w, h, &fps);
+    modes
+}
+
+/// Append a mode for the accumulated (codec, w×h, fps list); no-op if incomplete.
+#[cfg(target_os = "linux")]
+fn push_mode(modes: &mut Vec<CaptureMode>, codec: &str, w: u32, h: u32, fps: &[f32]) {
+    if codec.is_empty() || w == 0 || h == 0 {
+        return;
+    }
+    let (fmin, fmax) = if fps.is_empty() {
+        (0.0, 0.0)
+    } else {
+        (
+            fps.iter().cloned().fold(f32::INFINITY, f32::min),
+            fps.iter().cloned().fold(0.0_f32, f32::max),
+        )
+    };
+    modes.push(CaptureMode {
+        codec: normalize_codec(codec),
+        min_width: w,
+        min_height: h,
+        max_width: w,
+        max_height: h,
+        fps_min: if fmin.is_finite() { fmin } else { 0.0 },
+        fps_max: fmax,
+        fps_list: fps.to_vec(),
+    });
+}
+
+/// Content between the first pair of single quotes (v4l2-ctl codec lines: `[0]: 'MJPG' (…)`).
+#[cfg(target_os = "linux")]
+fn between_single_quotes(s: &str) -> Option<&str> {
+    let start = s.find('\'')? + 1;
+    let end = s[start..].find('\'')? + start;
+    Some(&s[start..end])
+}
+
 // ── Parsers (pure; unit-tested cross-platform) ────────────────────────
 
 /// Parse `ffmpeg -f dshow -list_devices true` stderr into video devices (audio devices skipped).
@@ -281,6 +475,7 @@ fn parse_v4l2_modes(stderr: &str) -> Vec<CaptureMode> {
                     max_height: h,
                     fps_min: 0.0,
                     fps_max: 0.0,
+                    fps_list: Vec::new(),
                 });
             }
         }
@@ -324,6 +519,7 @@ fn parse_dshow_modes(stderr: &str) -> Vec<CaptureMode> {
             max_height: max_h,
             fps_min: if fps_min.is_finite() { fps_min } else { 0.0 },
             fps_max,
+            fps_list: Vec::new(),
         });
     }
     out
@@ -503,5 +699,58 @@ mod tests {
         assert_eq!(parse_wxh("1920x1080"), Some((1920, 1080)));
         assert_eq!(parse_wxh("0x556ab"), None);
         assert_eq!(parse_wxh("nonsense"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn v4l2ctl_devices_grouping() {
+        let s = "\
+Dell Webcam WB7022 (usb-0000:00:14.0-1.2.2.1):
+\t/dev/video4
+\t/dev/video5
+\t/dev/media2
+Integrated_Webcam_HD: Integrate (usb-0000:00:14.0-6):
+\t/dev/video0
+\t/dev/video1";
+        let g = parse_v4l2ctl_devices(s);
+        assert_eq!(g.len(), 2);
+        assert_eq!(g[0].0, "Dell Webcam WB7022");
+        assert_eq!(g[0].1, vec!["/dev/video4", "/dev/video5"]); // /dev/media2 skipped
+        assert_eq!(g[1].0, "Integrated_Webcam_HD: Integrate");
+        assert_eq!(g[1].1, vec!["/dev/video0", "/dev/video1"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn v4l2ctl_modes_real_fps() {
+        // Real `--list-formats-ext` shape from a Dell WB7022 (colour node).
+        let s = "\
+\t[0]: 'YUYV' (YUYV 4:2:2)
+\t\tSize: Discrete 1280x720
+\t\t\tInterval: Discrete 0.042s (24.000 fps)
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+\t[1]: 'MJPG' (Motion-JPEG, compressed)
+\t\tSize: Discrete 1920x1080
+\t\t\tInterval: Discrete 0.017s (60.000 fps)
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+\t\tSize: Discrete 2560x1440
+\t\t\tInterval: Discrete 0.033s (30.000 fps)";
+        let m = parse_v4l2ctl_modes(s);
+        assert_eq!(m.len(), 3);
+        // YUYV 720p: 24–30
+        assert_eq!(m[0].codec, "yuyv");
+        assert_eq!((m[0].fps_min, m[0].fps_max), (24.0, 30.0));
+        // MJPG 1080p offers 60, 1440p does NOT (the 1440p@60 bug this fixes).
+        assert_eq!((m[1].codec.as_str(), m[1].max_width, m[1].fps_max), ("mjpeg", 1920, 60.0));
+        assert_eq!((m[2].max_width, m[2].fps_max), (2560, 30.0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn colour_score_ranks_colour_over_ir_over_meta() {
+        let colour = colour_score("'MJPG' (Motion-JPEG)\n'YUYV' (YUYV 4:2:2)\n'NV12'");
+        let ir = colour_score("'GREY' (8-bit Greyscale)");
+        let meta = colour_score(""); // metadata node: no formats
+        assert!(colour > ir && ir == 0 && meta == 0);
     }
 }

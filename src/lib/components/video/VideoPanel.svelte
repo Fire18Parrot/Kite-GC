@@ -35,8 +35,11 @@
     setNativeDevice,
     setNativeResolution,
     setNativeFramerate,
+    setNativeCodec,
   } from '$lib/stores/video';
   import {
+    codecsFor,
+    codecLabel,
     resolutionsFor,
     frameratesFor,
     resolutionLabel,
@@ -186,11 +189,19 @@
   const RESOLUTIONS: VideoResolution[] = ['auto', '480p', '720p', '1080p'];
   const CAMERA_FPS: CameraFps[] = ['auto', '30', '60'];
 
-  // Native-capture cascade, derived from the probed modes (curated ∩ device). Codec is not a control
-  // — getUserMedia (the primary path) picks it — so the cascade is resolution → framerate only.
-  const nativeResolutions = $derived(resolutionsFor($videoState.nativeModes));
+  // Native-capture cascade, derived from the device's real probed modes: Format (codec) → Resolution
+  // → Framerate. Each level lists exactly what the device reports for the level(s) above it.
+  const nativeCodecs = $derived(codecsFor($videoState.nativeModes));
+  const nativeResolutions = $derived(
+    resolutionsFor($videoState.nativeModes, $videoState.nativeSel.codec),
+  );
   const nativeFramerates = $derived(
-    frameratesFor($videoState.nativeModes, $videoState.nativeSel.width, $videoState.nativeSel.height),
+    frameratesFor(
+      $videoState.nativeModes,
+      $videoState.nativeSel.codec,
+      $videoState.nativeSel.width,
+      $videoState.nativeSel.height,
+    ),
   );
 
   // Info-line frame rate. The native getUserMedia path (and camera) show measured/negotiated; the
@@ -350,6 +361,18 @@
       {#if $videoState.nativeDevices.length === 0}
         <p class="hint">{$t('video.noNativeDevices')}</p>
       {:else}
+        <label class="field">
+          <span class="label">{$t('video.format')}</span>
+          <select
+            value={$videoState.nativeSel.codec}
+            onchange={(e) => void setNativeCodec((e.currentTarget as HTMLSelectElement).value)}
+          >
+            {#each nativeCodecs as c}
+              <option value={c}>{codecLabel(c)}</option>
+            {/each}
+          </select>
+        </label>
+
         <label class="field">
           <span class="label">{$t('video.resolution')}</span>
           <select

@@ -639,6 +639,7 @@
     },
     "device": "Video Device",
     "defaultDevice": "Default device",
+    "format": "Format",
     "resolution": "Resolution",
     "framerate": "Frame rate",
     "auto": "Auto",

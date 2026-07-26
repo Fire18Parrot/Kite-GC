@@ -117,6 +117,7 @@ interface VideoPrefs {
   cameraFps: CameraFps;
   rtspUrl: string;
   nativeDevice: string | null;
+  nativeCodec: string;
   nativeWidth: number;
   nativeHeight: number;
   nativeFps: number;
@@ -136,6 +137,7 @@ const PREF_DEFAULTS: VideoPrefs = {
   cameraFps: 'auto',
   rtspUrl: '',
   nativeDevice: null,
+  nativeCodec: 'mjpeg',
   nativeWidth: 1280,
   nativeHeight: 720,
   nativeFps: 30,
@@ -163,6 +165,7 @@ function loadPrefs(): VideoPrefs {
         cameraFps: p.cameraFps ?? 'auto',
         rtspUrl: p.rtspUrl ?? '',
         nativeDevice: p.nativeDevice ?? p.v4l2Device ?? null,
+        nativeCodec: p.nativeCodec ?? 'mjpeg',
         nativeWidth: p.nativeWidth ?? 1280,
         nativeHeight: p.nativeHeight ?? 720,
         nativeFps: p.nativeFps ?? 30,
@@ -188,6 +191,7 @@ function savePrefs(): void {
         cameraFps: s.cameraFps,
         rtspUrl: s.rtspUrl,
         nativeDevice: s.nativeDevice,
+        nativeCodec: s.nativeSel.codec,
         nativeWidth: s.nativeSel.width,
         nativeHeight: s.nativeSel.height,
         nativeFps: s.nativeSel.fps,
@@ -218,6 +222,7 @@ const INITIAL: VideoState = {
   nativeDevice: boot.nativeDevice,
   nativeModes: [],
   nativeSel: {
+    codec: boot.nativeCodec,
     width: boot.nativeWidth,
     height: boot.nativeHeight,
     fps: boot.nativeFps,
@@ -302,12 +307,13 @@ async function buildMjpegUrl(): Promise<string> {
   return `http://127.0.0.1:${port}/api/stream.mjpeg?src=kite`;
 }
 
-/** Start a native device via the built-in MJPEG server (no go2rtc dependency). Used only as the
- *  fallback for devices getUserMedia can't expose — codec is left to ffmpeg (`auto`). */
+/** Start a native device via the built-in ffmpeg→MJPEG server (no getUserMedia, no go2rtc). The chosen
+ *  codec is the capture input format: MJPEG is stream-copied (`-c copy`, the camera's HW JPEG encoder
+ *  does the work), raw/H.264 is transcoded to MJPEG for the `<img>` sink. */
 async function startNativeMjpeg(sel: NativeSelection, id: string): Promise<string> {
   return await invoke<string>('video_native_mjpeg_start', {
     id,
-    codec: 'auto',
+    codec: sel.codec,
     width: sel.width,
     height: sel.height,
     fps: sel.fps,
@@ -317,84 +323,6 @@ async function startNativeMjpeg(sel: NativeSelection, id: string): Promise<strin
 /** Stop the built-in MJPEG server. */
 async function stopNativeMjpeg(): Promise<void> {
   await invoke('video_native_mjpeg_stop').catch(() => {});
-}
-
-/** Normalize a device name/label for cross-API matching (OS device name ↔ getUserMedia label). Drops
- *  parenthesised suffixes (USB ids like "(046d:0825)", bus paths) and non-alphanumerics, which differ
- *  wildly between the V4L2 sysfs name and the WebKitGTK/Chromium label for the same camera. */
-function normalizeDeviceName(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/\([^)]*\)/g, ' ')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-/** Map a probed native device to a getUserMedia `deviceId` so we can stream it through the clean
- *  hardware `<video>` path. Returns null only when getUserMedia genuinely can't expose the device
- *  (→ the caller uses the ffmpeg/MJPEG fallback). Bootstraps a one-off permission grant if labels
- *  aren't populated yet. */
-async function findGetUserMediaId(nativeId: string): Promise<string | null> {
-  if (!mediaDevicesAvailable()) return null;
-  const dev = get(videoState).nativeDevices.find((d) => d.id === nativeId);
-  const want = dev ? normalizeDeviceName(dev.name) : '';
-
-  const inputs = async () =>
-    (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
-  let cams = await inputs();
-  if (cams.every((c) => !c.label)) {
-    // Labels need a prior permission grant — request one, release it, then re-enumerate.
-    try {
-      const tmp = await navigator.mediaDevices.getUserMedia({ video: true });
-      for (const t of tmp.getTracks()) t.stop();
-      cams = await inputs();
-    } catch {
-      return null;
-    }
-  }
-
-  let match = want
-    ? (cams.find((c) => normalizeDeviceName(c.label) === want) ??
-       cams.find((c) => {
-         const l = normalizeDeviceName(c.label);
-         return l && (l.includes(want) || want.includes(l));
-       }))
-    : undefined;
-  // Robust fallback: a single-camera system (the laptop case) is unambiguous even when the V4L2 name
-  // and the getUserMedia label don't textually match — the name formats differ a lot on Linux.
-  if (!match && cams.length === 1 && cams[0].deviceId) match = cams[0];
-
-  console.log('[video] native→getUserMedia match', {
-    want,
-    labels: cams.map((c) => c.label),
-    matched: match?.label ?? null,
-  });
-  return match?.deviceId ?? null;
-}
-
-/** Open a native device through getUserMedia (a hardware `<video>` MediaStream). Degrades gracefully:
- *  `exact` resolution/framerate first (honour the selection on Chromium/WebView2), then `ideal`
- *  (WebKitGTK's getUserMedia throws OverconstrainedError on `exact` it can't meet 1:1 — `ideal` is
- *  what the plain camera path uses and never throws), then a bare device open. Throws only if every
- *  attempt fails. */
-async function getNativeUserMedia(deviceId: string, sel: NativeSelection): Promise<MediaStream> {
-  const dev: ConstrainDOMString = { exact: deviceId };
-  const attempts: MediaTrackConstraints[] = [
-    { deviceId: dev, width: { exact: sel.width }, height: { exact: sel.height }, frameRate: { exact: sel.fps } },
-    { deviceId: dev, width: { ideal: sel.width }, height: { ideal: sel.height }, frameRate: { ideal: sel.fps } },
-    { deviceId: dev },
-  ];
-  let lastErr: unknown;
-  for (const video of attempts) {
-    try {
-      return await navigator.mediaDevices.getUserMedia({ video, audio: false });
-    } catch (e) {
-      lastErr = e;
-      console.warn('[video] native getUserMedia attempt failed', video, e);
-    }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 /** Enumerate video input devices. Labels are only populated once permission has
@@ -639,10 +567,10 @@ export async function startRtsp(): Promise<void> {
   }
 }
 
-/** Open a native capture device with device-verified resolution/framerate. Primary path: getUserMedia
- *  with `exact` constraints → a hardware-composited `<video>` MediaStream (no map-compositor
- *  contention, no transcoding — the same clean path as the plain camera). Fallback: the ffmpeg → MJPEG
- *  `<img>` server, only for devices getUserMedia can't expose (e.g. some Linux HDMI dongles). */
+/** Open a native capture device via ffmpeg → the embedded MJPEG server → `<img>`. This path is
+ *  deliberately independent of getUserMedia/WebKit: the backend enumerates and opens the exact device
+ *  (V4L2/DirectShow/AVFoundation), so device selection + codec/resolution/framerate are reliable even
+ *  where the browser's capture stack is flaky. Software `<img>` decode is the trade-off. */
 export async function startNative(): Promise<void> {
   stopTracks();
   const st = get(videoState);
@@ -654,32 +582,6 @@ export async function startNative(): Promise<void> {
   patch({ kind: 'native', enabled: true, status: 'starting', error: null, rtspEngine: null, mjpegUrl: null });
   savePrefs();
   const sel = st.nativeSel;
-
-  // Primary: hardware <video> via getUserMedia.
-  const guId = await findGetUserMediaId(id);
-  if (guId) {
-    try {
-      const stream = await getNativeUserMedia(guId, sel);
-      videoStream.set(stream);
-      const s = stream.getVideoTracks()[0]?.getSettings();
-      patch({
-        status: 'live',
-        error: null,
-        rtspEngine: null,
-        mjpegUrl: null,
-        width: s?.width ?? sel.width,
-        height: s?.height ?? sel.height,
-        aspect: s?.width && s?.height ? s.width / s.height : sel.width / sel.height,
-        frameRate: s?.frameRate ?? sel.fps,
-      });
-      return;
-    } catch (e) {
-      console.warn('[video] native getUserMedia failed, falling back to MJPEG', e);
-      stopTracks();
-    }
-  }
-
-  // Fallback: ffmpeg → MJPEG <img> (device not exposed by getUserMedia, or constraints unmet).
   try {
     const url = await startNativeMjpeg(sel, id);
     patch({
@@ -749,6 +651,16 @@ export async function setNativeDevice(id: string | null): Promise<void> {
 export async function setNativeResolution(width: number, height: number): Promise<void> {
   const st = get(videoState);
   const sel = validateSelection(st.nativeModes, { ...st.nativeSel, width, height });
+  patch({ nativeSel: sel });
+  savePrefs();
+  if (st.enabled && st.kind === 'native') await startNative();
+}
+
+/** Change native capture format (codec); re-validate resolution+framerate down the cascade; restart
+ *  if live. */
+export async function setNativeCodec(codec: string): Promise<void> {
+  const st = get(videoState);
+  const sel = validateSelection(st.nativeModes, { ...st.nativeSel, codec });
   patch({ nativeSel: sel });
   savePrefs();
   if (st.enabled && st.kind === 'native') await startNative();
