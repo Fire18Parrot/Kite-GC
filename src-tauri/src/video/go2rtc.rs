@@ -379,8 +379,20 @@ impl Go2Rtc {
             delete_stream_blocking(r.api_port);
             // Give go2rtc a moment to terminate the ffmpeg producer before the hard kill.
             std::thread::sleep(Duration::from_millis(300));
+            // Anything still parented to go2rtc after the DELETE is a producer it failed to reap, and
+            // `child.kill()` below does not take it with it — it is merely reparented to init, where
+            // nothing links it back to us any more. `kill_stale_readers` cannot help either: it
+            // identifies readers by their `rtsp://127.0.0.1:<port>/kite` publish target, and the MJPEG
+            // path's producer writes to a pipe (`-f mjpeg -`) and has no such target. Observed on a
+            // Pi 4: a full-rate 720p transcode kept running after Stop, with go2rtc already gone.
+            // Collect BEFORE the kill — afterwards the parent link is lost.
+            let strays = child_pids(r.child.id());
             let _ = r.child.kill();
             let _ = r.child.wait();
+            for pid in strays {
+                log::warn!("[video] go2rtc left a producer behind (pid {pid}) — killing it");
+                kill_pid(pid);
+            }
             log::info!("go2rtc stopped (was on :{}).", r.api_port);
         }
     }
@@ -461,6 +473,54 @@ fn list_ffmpeg_processes() -> Option<String> {
             .ok()?;
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     }
+}
+
+/// PIDs whose parent is `ppid`. Best-effort: an unavailable process listing means an empty list.
+fn child_pids(ppid: u32) -> Vec<u32> {
+    let Some(listing) = list_process_parents() else { return Vec::new() };
+    parse_children(&listing, ppid)
+}
+
+/// `pid ppid` for every running process, or None if the listing isn't available.
+fn list_process_parents() -> Option<String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }",
+        ]);
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        cmd.stdin(Stdio::null()).stderr(Stdio::null());
+        let out = cmd.output().ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+    #[cfg(not(windows))]
+    {
+        let out = Command::new("ps")
+            .args(["-eo", "pid=,ppid="])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+/// Pure part of `child_pids` (unit-tested): the first column of every line whose second column is
+/// `ppid`. Both listings are `pid ppid`, whitespace-padded on Unix and CRLF-terminated on Windows.
+fn parse_children(listing: &str, ppid: u32) -> Vec<u32> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split_whitespace();
+            let pid = cols.next()?.parse::<u32>().ok()?;
+            let parent = cols.next()?.parse::<u32>().ok()?;
+            (parent == ppid).then_some(pid)
+        })
+        .collect()
 }
 
 /// Terminate a process by pid (best-effort).
@@ -579,6 +639,22 @@ mod tests {
             "\r\n",
         );
         assert_eq!(parse_reader_candidates(listing), vec![(4312, 52001)]);
+    }
+
+    #[test]
+    fn children_of_a_go2rtc_pid() {
+        // `ps -eo pid=,ppid=` pads its columns; the MJPEG producer is the one that must be found,
+        // and it is exactly the shape `parse_reader_candidates` cannot see (a pipe, no publish port).
+        let listing = "\
+    1       0
+ 9999    1234
+ 7731    9999
+ 7732    9999
+ 8100       1";
+        assert_eq!(parse_children(listing, 9999), vec![7731, 7732]);
+        assert_eq!(parse_children(listing, 8100), Vec::<u32>::new());
+        // Windows: CRLF, no padding.
+        assert_eq!(parse_children("4312 9999\r\n4400 1\r\n", 9999), vec![4312]);
     }
 
     #[test]

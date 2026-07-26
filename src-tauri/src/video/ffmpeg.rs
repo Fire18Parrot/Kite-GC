@@ -257,9 +257,14 @@ fn probe_v4l2_h264_decode() -> bool {
     let clip = std::env::temp_dir().join("kite-hwdecode-probe.h264");
     let clip_arg = clip.to_string_lossy().to_string();
     let run = |args: &[&str]| -> bool { run_probe(&ff, args) };
+    // `-pix_fmt yuv420p` is load-bearing, not tidiness: `testsrc` emits rgb24 and libx264 then picks
+    // **yuv444p / High 4:4:4 Predictive**, which no hardware H.264 block decodes — the Pi's does 4:2:0
+    // only. Without it the probe failed on a Pi 4 whose decoder works perfectly for real streams, and
+    // the transcode silently stayed in software. The VAAPI probe hit the identical trap.
     let made = run(&[
         "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
-        "testsrc=size=320x240:rate=10:duration=1", "-c:v", "libx264", "-f", "h264", &clip_arg,
+        "testsrc=size=320x240:rate=10:duration=1", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-f",
+        "h264", &clip_arg,
     ]);
     let ok = made
         && run(&[
