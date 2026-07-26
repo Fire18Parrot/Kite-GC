@@ -623,6 +623,62 @@ export async function startVideo(): Promise<void> {
   }
 }
 
+/** Bring the feed up on the MJPEG image path: register the source, point the `<img>` sinks at
+ *  go2rtc's multipart endpoint. Returns false if it could not be started — the caller decides whether
+ *  that means a reconnect or a fall-through.
+ *
+ *  Used from two places, and the second is not a fallback for a broken WebView: an MJPEG source
+ *  cannot be carried over WebRTC by any browser, so it needs this path even where WebRTC works.
+ *  `requireCopy` is what makes that safe to try blindly — see the call site.
+ *
+ *  Cheaper than its reputation now: the backend stream-copies a source that already sends MJPEG, so
+ *  for one of those this costs a JPEG decode and no transcode at all. */
+async function startMjpegPath(url: string, transport: string, requireCopy = false): Promise<boolean> {
+  // An H.264 source has to be transcoded to gain an MJPEG track, and that needs ffmpeg. Missing
+  // ffmpeg makes the endpoint fail instantly — a dead end no reconnect fixes.
+  const ffmpeg = await invoke<string | null>('video_ffmpeg_status').catch(() => null);
+  if (!ffmpeg) {
+    logVideo('warn', 'MJPEG path needs ffmpeg and it is not installed');
+    if (!requireCopy) {
+      patch({ status: 'error', error: get(t)('video.ffmpegNativeMissing'), reconnecting: false, reconnectAttempt: 0 });
+    }
+    return false;
+  }
+  try {
+    // Hardware H.264 decoding (Pi 3/4 class boards) is the backend's call — but only while this feed
+    // has actually been delivering. Two failures in a row and we ask for the software decoder, so a
+    // host that passes the backend's probe yet cannot hold a live stream on the hardware path still
+    // ends up with a picture instead of an endless reconnect loop.
+    const transcode = await invoke<string>('video_webrtc_start', {
+      url,
+      useFfmpeg: transport === 'udp',
+      mjpeg: true,
+      // Two vetoes, either of which forces the software transcode: the user's explicit setting, and
+      // the automatic one after repeated failures.
+      allowHwDecode: !get(videoState).disableHwAccel && rtspMjpegFailures < 2,
+    });
+    if (requireCopy && transcode !== 'copy') return false;
+    const mjpegUrl = await buildMjpegUrl();
+    // Stopped while we were away? The awaits above straddle a Stop easily — the backend's hardware
+    // probe alone can take seconds on a first start — and `stopVideo` has killed go2rtc by then, while
+    // `ensure_running` inside the call above quietly started it again. Publishing 'live' + a URL
+    // regardless put the <img> sinks back on screen, which reconnects a consumer and spawns the
+    // transcode: the feed kept running (and kept a small board's CPU pinned) after the user stopped it.
+    if (get(videoState).kind !== 'rtsp' || !get(videoState).enabled) {
+      void invoke('video_webrtc_stop').catch(() => {});
+      return true; // not a failure — the user stopped it
+    }
+    // 'ffmpeg', always: this path is registered as an `ffmpeg:` source regardless of the transport,
+    // because go2rtc's native reader cannot transcode and fails UDP-only servers at SETUP anyway.
+    // Reporting 'native' here told the panel (and the tester) the opposite of what was running.
+    patch({ status: 'live', mjpegUrl, activeTranscode: transcode, error: null, rtspEngine: 'ffmpeg', reconnecting: false, reconnectAttempt: 0 });
+    return true;
+  } catch (e) {
+    logVideo('warn', `RTSP (MJPEG path) failed: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+}
+
 /** Register the source with go2rtc and complete one WebRTC negotiation. Throws on failure. */
 async function negotiateWebrtc(url: string, useFfmpeg: boolean): Promise<void> {
   await invoke('video_webrtc_start', { url, useFfmpeg, mjpeg: false });
@@ -893,56 +949,14 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
     );
   }
 
-  // MJPEG fallback for webviews without RTCPeerConnection (rare in Tauri). Reader choice: keep the
-  // native go2rtc client for auto/tcp (the pre-connection-list behaviour — works without ffmpeg);
-  // only an explicit UDP selection routes through the ffmpeg reader (needs ffmpeg, like the normal
-  // UDP path).
+  // MJPEG fallback for webviews without RTCPeerConnection (rare in Tauri).
   if (!isWebrtcAvailable()) {
-    // Degraded mode, and a silent one: it needs go2rtc to transcode to MJPEG and a WebView that renders
-    // multipart images. Worth a warning every time, not just a console line.
+    // Degraded mode, and a silent one: it needs a WebView that renders multipart images, and for an
+    // H.264 source a go2rtc transcode as well. Worth a warning every time, not just a console line.
     if (!reconnect) {
       logVideo('warn', 'WebRTC is unavailable in this WebView — falling back to the MJPEG image path');
     }
-    // Serving MJPEG means go2rtc has to TRANSCODE (an H.264 camera carries no MJPEG track), and that
-    // needs ffmpeg. Missing ffmpeg makes the endpoint fail instantly — a dead end no reconnect fixes.
-    const ffmpeg = await invoke<string | null>('video_ffmpeg_status').catch(() => null);
-    if (!ffmpeg) {
-      logVideo('warn', 'MJPEG fallback needs ffmpeg for transcoding and it is not installed');
-      patch({ status: 'error', error: get(t)('video.ffmpegNativeMissing'), reconnecting: false, reconnectAttempt: 0 });
-      return;
-    }
-    try {
-      // Hardware H.264 decoding (Pi 3/4 class boards) is the backend's call — but only while this
-      // feed has actually been delivering. Two failures in a row and we ask for the software decoder,
-      // so a host that passes the backend's probe yet can't hold a live stream on the hardware path
-      // still ends up with a picture instead of an endless reconnect loop.
-      const transcode = await invoke<string>('video_webrtc_start', {
-        url,
-        useFfmpeg: transport === 'udp',
-        mjpeg: true,
-        // Two vetoes, either of which forces the software transcode: the user's explicit setting, and
-        // the automatic one after repeated failures.
-        allowHwDecode: !get(videoState).disableHwAccel && rtspMjpegFailures < 2,
-      });
-      const mjpegUrl = await buildMjpegUrl();
-      // Stopped while we were away? The awaits above straddle a Stop easily — the backend's hardware
-      // probe alone can take seconds on a first start — and `stopVideo` has killed go2rtc by then,
-      // while `ensure_running` inside the call above quietly started it again. Publishing 'live' + a
-      // URL regardless put the <img> sinks back on screen, which reconnects a consumer and spawns the
-      // transcode: the feed kept running (and kept a small board's CPU pinned) after the user stopped
-      // it. Undo the restart and bail, exactly like the WebRTC path below.
-      if (get(videoState).kind !== 'rtsp' || !get(videoState).enabled) {
-        void invoke('video_webrtc_stop').catch(() => {});
-        return;
-      }
-      // 'ffmpeg', always: an MJPEG source is registered as `ffmpeg:…#video=mjpeg` regardless of the
-      // transport, because go2rtc's native reader cannot transcode. Reporting 'native' here told the
-      // panel (and the tester) the opposite of what was running.
-      patch({ status: 'live', mjpegUrl, activeTranscode: transcode, error: null, rtspEngine: 'ffmpeg', reconnecting: false, reconnectAttempt: 0 });
-    } catch (e) {
-      logVideo('warn', `RTSP (MJPEG fallback) failed: ${e instanceof Error ? e.message : String(e)}`);
-      scheduleRtspReconnect();
-    }
+    if (!(await startMjpegPath(url, transport))) scheduleRtspReconnect();
     return;
   }
 
@@ -961,6 +975,16 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
     if (rtcConn) startRtspStallMonitor(rtcConn);
   } catch (err) {
     logVideo('warn', `RTSP connect failed: ${err instanceof Error ? err.message : String(err)}`);
+    // An MJPEG source cannot travel over WebRTC at all — its video codecs are H.264/VP8/VP9/AV1 — so
+    // even a WebRTC-capable WebView has to use the image path for one, and negotiation failing is the
+    // first moment we could know. `requireCopy` keeps this honest: the image path is accepted only if
+    // the backend reports an actual stream copy, i.e. the source really was MJPEG. Anything else means
+    // the source was H.264 and WebRTC failed for some other reason (server down, transport), where
+    // silently settling for a transcode would be a permanent downgrade — so that keeps reconnecting.
+    if (await startMjpegPath(url, transport, true)) {
+      logVideo('warn', 'source is MJPEG, which WebRTC cannot carry — switched to the image path');
+      return;
+    }
     scheduleRtspReconnect();
   }
 }
