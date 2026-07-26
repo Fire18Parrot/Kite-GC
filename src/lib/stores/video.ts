@@ -95,6 +95,15 @@ export interface VideoState {
   reconnectAttempt: number;
   /** go2rtc MJPEG HTTP URL for systems where RTCPeerConnection is unavailable. */
   mjpegUrl: string | null;
+  /** What the RUNNING feed actually does, as reported by the backend: 'copy' (stream-copied, nothing
+   *  to accelerate), 'software', 'vaapi', 'v4l2m2m', 'none' (no transcode at all — WebRTC), or null
+   *  when nothing is live. Runtime-only. Reported rather than inferred: whether this host *can* do
+   *  hardware and whether this feed *is* using it are different questions. */
+  activeTranscode: string | null;
+  /** User veto on hardware transcoding: force the software path even where the backend's probe says
+   *  hardware works. An escape hatch for driver/hardware combinations we can't anticipate — hardware
+   *  stays the default, this is the opt-out. */
+  disableHwAccel: boolean;
   /** Mirror horizontally (front-facing cams) — applied by the display sinks. */
   mirror: boolean;
   /** Source aspect ratio (w/h); drives the widget / floating-window sizing. */
@@ -147,6 +156,7 @@ interface VideoPrefs {
   nativeWidth: number;
   nativeHeight: number;
   nativeFps: number;
+  disableHwAccel: boolean;
   mirror: boolean;
   floating: boolean;
   floatSnapped: boolean;
@@ -170,6 +180,7 @@ const PREF_DEFAULTS: VideoPrefs = {
   nativeWidth: 1280,
   nativeHeight: 720,
   nativeFps: 30,
+  disableHwAccel: false,
   mirror: false,
   floating: false,
   floatSnapped: true,
@@ -201,6 +212,7 @@ function loadPrefs(): VideoPrefs {
         nativeWidth: p.nativeWidth ?? 1280,
         nativeHeight: p.nativeHeight ?? 720,
         nativeFps: p.nativeFps ?? 30,
+        disableHwAccel: p.disableHwAccel ?? false,
       };
     }
   } catch {
@@ -230,6 +242,7 @@ function savePrefs(): void {
         nativeWidth: s.nativeSel.width,
         nativeHeight: s.nativeSel.height,
         nativeFps: s.nativeSel.fps,
+        disableHwAccel: s.disableHwAccel,
         mirror: s.mirror,
         floating: s.floating,
         floatSnapped: s.floatSnapped,
@@ -270,6 +283,8 @@ const INITIAL: VideoState = {
   reconnecting: false,
   reconnectAttempt: 0,
   mjpegUrl: null,
+  activeTranscode: null,
+  disableHwAccel: boot.disableHwAccel,
   mirror: boot.mirror,
   aspect: 16 / 9,
   width: null,
@@ -396,8 +411,11 @@ async function buildMjpegUrl(): Promise<string> {
 /** Start a native device via the built-in ffmpeg→MJPEG server (no getUserMedia, no go2rtc). The chosen
  *  codec is the capture input format: MJPEG is stream-copied (`-c copy`, the camera's HW JPEG encoder
  *  does the work), raw/H.264 is transcoded to MJPEG for the `<img>` sink. */
-async function startNativeMjpeg(sel: NativeSelection, id: string): Promise<string> {
-  return await invoke<string>('video_native_mjpeg_start', {
+async function startNativeMjpeg(
+  sel: NativeSelection,
+  id: string,
+): Promise<{ url: string; transcode: string }> {
+  return await invoke<{ url: string; transcode: string }>('video_native_mjpeg_start', {
     id,
     codec: sel.codec,
     width: sel.width,
@@ -898,17 +916,19 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
       // feed has actually been delivering. Two failures in a row and we ask for the software decoder,
       // so a host that passes the backend's probe yet can't hold a live stream on the hardware path
       // still ends up with a picture instead of an endless reconnect loop.
-      await invoke('video_webrtc_start', {
+      const transcode = await invoke<string>('video_webrtc_start', {
         url,
         useFfmpeg: transport === 'udp',
         mjpeg: true,
-        allowHwDecode: rtspMjpegFailures < 2,
+        // Two vetoes, either of which forces the software transcode: the user's explicit setting, and
+        // the automatic one after repeated failures.
+        allowHwDecode: !get(videoState).disableHwAccel && rtspMjpegFailures < 2,
       });
       const mjpegUrl = await buildMjpegUrl();
       // 'ffmpeg', always: an MJPEG source is registered as `ffmpeg:…#video=mjpeg` regardless of the
       // transport, because go2rtc's native reader cannot transcode. Reporting 'native' here told the
       // panel (and the tester) the opposite of what was running.
-      patch({ status: 'live', mjpegUrl, error: null, rtspEngine: 'ffmpeg', reconnecting: false, reconnectAttempt: 0 });
+      patch({ status: 'live', mjpegUrl, activeTranscode: transcode, error: null, rtspEngine: 'ffmpeg', reconnecting: false, reconnectAttempt: 0 });
     } catch (e) {
       logVideo('warn', `RTSP (MJPEG fallback) failed: ${e instanceof Error ? e.message : String(e)}`);
       scheduleRtspReconnect();
@@ -975,10 +995,11 @@ export async function startNative(): Promise<void> {
   savePrefs();
   const sel = st.nativeSel;
   try {
-    const url = await startNativeMjpeg(sel, id);
+    const { url, transcode } = await startNativeMjpeg(sel, id);
     patch({
       status: 'live',
       mjpegUrl: url,
+      activeTranscode: transcode,
       error: null,
       rtspEngine: 'ffmpeg',
       width: sel.width,
@@ -1007,7 +1028,7 @@ export function stopVideo(): void {
     void invoke('video_webrtc_stop').catch(() => {});
     void stopNativeMjpeg();
   }
-  patch({ enabled: false, status: 'off', error: null, rtspEngine: null, mjpegUrl: null, reconnecting: false, reconnectAttempt: 0 });
+  patch({ enabled: false, status: 'off', error: null, rtspEngine: null, mjpegUrl: null, activeTranscode: null, reconnecting: false, reconnectAttempt: 0 });
   savePrefs();
 }
 
@@ -1155,6 +1176,17 @@ export async function setVideoResolution(resolution: VideoResolution): Promise<v
 export function setVideoMirror(mirror: boolean): void {
   patch({ mirror });
   savePrefs();
+}
+
+/** Force the software transcode regardless of what the backend's hardware probe found. Restarts a
+ *  live RTSP feed so the change takes effect immediately — the decision is made when the source is
+ *  registered with go2rtc, not per frame. */
+export async function setDisableHwAccel(disableHwAccel: boolean): Promise<void> {
+  if (get(videoState).disableHwAccel === disableHwAccel) return;
+  patch({ disableHwAccel });
+  savePrefs();
+  const s = get(videoState);
+  if (s.enabled && s.kind === 'rtsp') await startRtsp();
 }
 
 // ── Floating window ──────────────────────────────────────────────────

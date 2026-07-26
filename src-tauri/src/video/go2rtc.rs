@@ -270,6 +270,40 @@ impl Go2Rtc {
         // download is picked up on the next stream start without restarting go2rtc.
         let ffmpeg_bin = super::ffmpeg::find_ffmpeg()
             .unwrap_or_else(|| dir.join(super::ffmpeg::binary_name()));
+        // Hardware transcode templates. They live HERE, as named `ffmpeg:` entries, rather than being
+        // spelled out in the source string, because go2rtc rejects any source containing a space
+        // ("source with spaces may be insecure" → HTTP 400 on PUT /api/streams). A named template is
+        // referenced as `#input=NAME` / `#video=NAME`, so the source stays space-free while the
+        // expansion carries as many arguments as it likes. See `commands::video::video_webrtc_start`.
+        let mut ffmpeg_cfg = serde_json::Map::new();
+        ffmpeg_cfg.insert("bin".into(), ffmpeg_bin.to_string_lossy().into());
+        // Pi-class SoCs: hardware H.264 decode only (there is no V4L2 M2M MJPEG encoder), mirroring
+        // go2rtc's own `rtsp/udp` input template so a stream that reads on one reads on the other.
+        if super::ffmpeg::v4l2_h264_decode_available() {
+            ffmpeg_cfg.insert(
+                "kite_hw_input".into(),
+                "-c:v h264_v4l2m2m -fflags nobuffer -flags low_delay -timeout {timeout} \
+                 -user_agent go2rtc/ffmpeg -i {input}"
+                    .into(),
+            );
+        } else if let Some(node) = super::ffmpeg::vaapi_render_node() {
+            // Desktop GPUs: the whole chain on the GPU. `-hwaccel_output_format vaapi` is the load-
+            // bearing part — it keeps decoded frames in GPU memory for the encoder below. Without it
+            // every frame is copied back to system memory and the chain ends up SLOWER than software.
+            ffmpeg_cfg.insert(
+                "kite_hw_input".into(),
+                format!(
+                    "-hwaccel vaapi -hwaccel_device {node} -hwaccel_output_format vaapi \
+                     -fflags nobuffer -flags low_delay -timeout {{timeout}} \
+                     -user_agent go2rtc/ffmpeg -i {{input}}"
+                )
+                .into(),
+            );
+            // `-async_depth 1`: the VAAPI encoders pipeline 2 frames by default for throughput, which
+            // on a live FPV feed is simply latency (~1 frame at 60 fps, more at lower rates) — and the
+            // software encoder it replaces has none. We want the frame out, not the frame rate.
+            ffmpeg_cfg.insert("kite_hw_mjpeg".into(), "-c:v mjpeg_vaapi -async_depth 1".into());
+        }
         let cfg = serde_json::json!({
             "api": { "listen": format!("127.0.0.1:{api_port}") },
             "rtsp": { "listen": format!("127.0.0.1:{rtsp_port}") },
@@ -277,7 +311,7 @@ impl Go2Rtc {
                 "listen": format!("127.0.0.1:{webrtc_port}"),
                 "candidates": [format!("127.0.0.1:{webrtc_port}")],
             },
-            "ffmpeg": { "bin": ffmpeg_bin.to_string_lossy() },
+            "ffmpeg": serde_json::Value::Object(ffmpeg_cfg),
             "log": { "level": "warn" },
         });
         std::fs::write(&cfg_path, cfg.to_string())

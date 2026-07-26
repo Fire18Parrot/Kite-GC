@@ -89,6 +89,9 @@ impl MjpegServer {
             // Raw / H.264 / auto → re-encode to MJPEG for the multipart sink.
             args.extend(["-c:v".into(), "mjpeg".into(), "-q:v".into(), "5".into()]);
         } else {
+            // The camera already emits MJPEG: pass the packets straight through. No decode, no
+            // encode, no colour conversion — cheaper than any hardware transcode could ever be, so
+            // there is deliberately nothing to accelerate here.
             args.extend(["-c".into(), "copy".into()]);
         }
         // Emit each packet immediately (no output buffering) → even, low-jitter frame delivery.

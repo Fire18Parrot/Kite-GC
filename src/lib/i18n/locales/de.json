@@ -663,7 +663,10 @@
     },
     "pipeline": {
       "hw": "Hardware",
-      "sw": "Software"
+      "sw": "Software",
+      "transcode": "Transkodierung",
+      "surface": "Darstellung",
+      "copy": "Direkt"
     },
     "mirror": "Horizontal spiegeln",
     "codec": "Codec",
@@ -675,7 +678,9 @@
     "noDevices": "Keine Kamera erkannt. Kamera oder USB-Capture-Gerät anschließen.",
     "noNativeDevices": "Keine nativen Capture-Geräte gefunden. USB-HDMI-Dongle oder Capture-Karte anschließen.",
     "mjpegLoadFailed": "Videostream konnte nicht angezeigt werden — die Quelle wurde beendet oder dieses System kann ihn nicht darstellen.",
-    "ffmpegNativeMissing": "ffmpeg wird für Native Capture benötigt – spricht die Gerätehardware direkt an (V4L2 / DirectShow / AVFoundation)."
+    "ffmpegNativeMissing": "ffmpeg wird für Native Capture benötigt – spricht die Gerätehardware direkt an (V4L2 / DirectShow / AVFoundation).",
+    "disableHwAccel": "Hardwarebeschleunigung deaktivieren",
+    "disableHwAccelHint": "Erzwingt die Software-Transkodierung. Nur nötig, wenn das Bild mit Hardwarebeschleunigung fehlerhaft oder instabil ist."
   },
   "terrain": {
     "title": "Geländeanalyse",

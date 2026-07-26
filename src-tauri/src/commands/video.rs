@@ -81,14 +81,27 @@ pub async fn video_webrtc_start(
     mjpeg: bool,
     allow_hw_decode: Option<bool>,
     engine: State<'_, Go2Rtc>,
-) -> Result<(), String> {
+) -> Result<String, String> {
+    // Resolve the hardware probes FIRST and on a blocking thread: each runs two short ffmpeg
+    // processes, and `ensure_running` below writes the go2rtc config, which reads the same (cached)
+    // verdicts to emit the transcode templates — doing it in the other order would run those ffmpeg
+    // spawns on the async runtime's thread. Both probes are resolved in the same call for the same
+    // reason: `||` would short-circuit on a Pi (V4L2 available → VAAPI left unprobed), and the
+    // `hw_mjpeg_encode` read below would then trigger it off-thread.
+    // V4L2 M2M is the Pi-class path (decode only); VAAPI is the desktop-GPU one and does the whole
+    // chain — see `video::ffmpeg` for why a half-hardware chain is deliberately not an option.
+    let (hw_v4l2, hw_vaapi) = tauri::async_runtime::spawn_blocking(|| {
+        (
+            crate::video::ffmpeg::v4l2_h264_decode_available(),
+            crate::video::ffmpeg::vaapi_render_node().is_some(),
+        )
+    })
+    .await
+    .unwrap_or((false, false));
     let port = engine.ensure_running()?;
-    // Probing runs two short ffmpeg processes, so keep it off the async runtime's thread.
-    let hw_decode = mjpeg
-        && allow_hw_decode.unwrap_or(true)
-        && tauri::async_runtime::spawn_blocking(crate::video::ffmpeg::v4l2_h264_decode_available)
-            .await
-            .unwrap_or(false);
+    let hw = mjpeg && allow_hw_decode.unwrap_or(true) && (hw_v4l2 || hw_vaapi);
+    // V4L2 M2M has no MJPEG encoder, so a Pi keeps go2rtc's software one; VAAPI does both halves.
+    let hw_mjpeg_encode = hw_vaapi && !hw_v4l2;
     // `mjpeg` = the consumer will be go2rtc's `/api/stream.mjpeg` endpoint, which can only serve a
     // stream that actually carries an MJPEG track. An ordinary H.264 camera does not, so the source
     // must be registered with `#video=mjpeg` — an ffmpeg TRANSCODE, not a copy. Without it the endpoint
@@ -97,16 +110,18 @@ pub async fn video_webrtc_start(
     // `input=rtsp/udp` template (ffmpeg with NO forced -rtsp_transport) rather than honouring the
     // transport choice: that is the only variant that also reads UDP-only servers, and a connection
     // left on "Auto" would otherwise fail to open one at all.
-    let src = if mjpeg && hw_decode {
-        // go2rtc's own `rtsp/udp` template with the hardware decoder selected for the input. The
-        // encode stays software — these SoCs have no hardware MJPEG encoder — but the decode is the
-        // expensive half on a 720p60 source, and on a Pi 4 it is the difference between a usable
-        // picture and none. Everything else is byte-identical to the software template, so a stream
-        // that reads on one reads on the other.
-        format!(
-            "ffmpeg:{url}#input=-c:v h264_v4l2m2m -fflags nobuffer -flags low_delay \
-             -timeout {{timeout}} -user_agent go2rtc/ffmpeg -i {{input}}#video=mjpeg"
-        )
+    let src = if mjpeg && hw {
+        // Hardware transcode. The arguments live in NAMED templates written into the go2rtc config
+        // (`kite_hw_input` / `kite_hw_mjpeg`, see `video::go2rtc`) — spelling them out inline is not an
+        // option because go2rtc rejects any source containing a space with HTTP 400 ("source with
+        // spaces may be insecure"), which used to make this branch fail the stream registration
+        // outright on exactly the hardware it was written for. Everything else matches the software
+        // template, so a stream that reads on one reads on the other.
+        //
+        // On Pi-class SoCs only the decode is hardware (no V4L2 M2M MJPEG encoder exists) and the
+        // encoder stays go2rtc's `mjpeg`; with VAAPI both halves are, and the frames never leave the GPU.
+        let enc = if hw_mjpeg_encode { "kite_hw_mjpeg" } else { "mjpeg" };
+        format!("ffmpeg:{url}#input=kite_hw_input#video={enc}")
     } else if mjpeg {
         format!("ffmpeg:{url}#input=rtsp/udp#video=mjpeg")
     } else if use_ffmpeg {
@@ -128,7 +143,15 @@ pub async fn video_webrtc_start(
     if !resp.status().is_success() {
         return Err(format!("go2rtc add-stream HTTP {}", resp.status()));
     }
-    Ok(())
+    // Report what was actually registered, so the UI states the running pipeline instead of the
+    // host's capabilities. Without `mjpeg` go2rtc repackages the stream and nothing transcodes.
+    Ok(match (mjpeg, hw, hw_mjpeg_encode) {
+        (false, _, _) => "none",
+        (true, true, true) => "vaapi",
+        (true, true, false) => "v4l2m2m",
+        (true, false, _) => "software",
+    }
+    .to_string())
 }
 
 /// Exchange a browser WebRTC SDP offer with go2rtc and return the SDP answer (proxied to avoid CORS).
@@ -202,7 +225,11 @@ pub fn video_probe_device(id: String) -> Vec<native::CaptureMode> {
 
 /// Start the embedded MJPEG HTTP server capturing from a native device with the chosen mode
 /// (codec/resolution/framerate). MJPEG input is stream-copied; anything else is transcoded. Returns
-/// the local URL (`http://127.0.0.1:PORT/`), killing any previous server first.
+/// the local URL plus the transcode mode actually used, killing any previous server first.
+///
+/// The mode is reported rather than inferred in the UI: "can this host do hardware" and "is this
+/// stream using it" are different questions, and showing the first as if it were the second told the
+/// user "Hardware" for a feed that was in fact a plain stream copy.
 ///
 /// Only returns `Ok` once the capture actually produced its first bytes — a device that rejects the
 /// requested mode used to leave the UI showing "live" over a black frame (see `MjpegServer::start`).
@@ -214,10 +241,14 @@ pub fn video_native_mjpeg_start(
     height: u32,
     fps: u32,
     mjpeg: State<'_, crate::video::MjpegServer>,
-) -> Result<String, String> {
+) -> Result<serde_json::Value, String> {
     let spec = native::CaptureSpec { id, codec, width, height, fps };
+    // Native capture has no hardware transcode path: an MJPEG camera is stream-copied (nothing left
+    // to accelerate) and the raw-input case measured only ~21 % better on VAAPI because the upload
+    // eats most of the gain, so it stays in software.
+    let transcode = if native::needs_transcode(&spec.codec) { "software" } else { "copy" };
     let port = mjpeg.start(&spec)?;
-    Ok(format!("http://127.0.0.1:{port}/"))
+    Ok(serde_json::json!({ "url": format!("http://127.0.0.1:{port}/"), "transcode": transcode }))
 }
 
 /// Stop the embedded MJPEG server if running. Async: kills ffmpeg and joins the broadcast threads,

@@ -94,11 +94,21 @@ sustain. Two things are worth knowing:
   brings its own browser engine and does not use the system's media packages at all. If video matters
   to you on Linux, prefer the **.deb / system installation** — it uses your distribution's engine and
   plugins, which you can at least influence.
-- **Hardware decoding is used automatically where it exists.** On boards whose chip can decode H.264
-  itself (Raspberry Pi 3 and 4 among them), Kite tests this once at startup and then lets the hardware
-  do the decoding half of the conversion. The log line `[ffmpeg] V4L2 hardware H.264 decoding: …` tells
-  you which way it went. A Raspberry Pi 5 has no such decoder — there everything is done on the CPU,
-  and no setting changes that.
+- **Hardware conversion is used automatically where it exists.** Kite tests the machine once at
+  start-up and writes the verdict to the log:
+    - Desktop graphics (Intel and AMD, via VAAPI) can do **both halves** — decoding and re-encoding —
+      with the frames never leaving the GPU. Look for `[ffmpeg] VAAPI hardware H.264-decode +
+      MJPEG-encode: …`. On an Intel laptop this cut ffmpeg's CPU use to roughly a seventh.
+      **NVIDIA cards are not specifically covered**; if the test fails, Kite converts on the CPU.
+    - Boards whose chip decodes H.264 itself (Raspberry Pi 3 and 4 among them) accelerate the
+      **decoding half** — see `[ffmpeg] V4L2 hardware H.264 decoding: …`. A Raspberry Pi 5 has no such
+      decoder, so there everything is done on the CPU.
+  Kite deliberately uses hardware only when it can do the *whole* conversion on a desktop GPU: doing
+  just one half there means copying every frame back out of graphics memory, which is slower than
+  staying on the CPU altogether.
+- **You can force the CPU path.** If the picture is broken or unstable with hardware conversion, switch
+  on **Disable hardware acceleration** in the Video panel. The Video panel also states which path is
+  live — `Transcode: Hardware`, `Software`, or `Copy` when nothing needs converting at all.
 - **Send a smaller or slower stream from the source.** This is the one lever that really works, because
   it removes the work at *every* stage — network, decoding, conversion and display. On a single-board
   computer, 480p at 30 fps is comfortable where 720p60 is not. Set it where the stream is produced (your

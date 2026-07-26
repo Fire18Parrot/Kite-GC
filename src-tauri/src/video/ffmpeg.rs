@@ -89,7 +89,10 @@ pub fn version() -> Option<String> {
 /// Probed by actually decoding a one-second clip, because the codec being listed proves nothing: every
 /// Linux ffmpeg build compiles `h264_v4l2m2m` in, device or no device. Cached for the process and
 /// logged once, so a tester's log states the verdict.
-#[cfg(target_os = "linux")]
+/// ARM-only: V4L2 M2M is the SoC (Raspberry Pi class) interface. Desktop GPUs expose VAAPI instead —
+/// see `vaapi_mjpeg_transcode_available` — so probing this on x86 spawns two ffmpeg processes to
+/// answer a question whose answer is already known.
+#[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
 pub fn v4l2_h264_decode_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| {
@@ -106,14 +109,104 @@ pub fn v4l2_h264_decode_available() -> bool {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm"))))]
 pub fn v4l2_h264_decode_available() -> bool {
     false
 }
 
+/// The DRM render node VAAPI runs on, if hardware H.264-decode **and** MJPEG-encode both work there.
+///
+/// Both halves are required together and that is the whole point: a half-hardware chain is *slower*
+/// than staying in software, because every decoded frame has to be copied back out of GPU memory for
+/// the software encoder. Measured on an 8th-gen Intel iGPU, 300 frames, CPU time:
+///
+/// | chain                        | 720p60 | 1080p60 |
+/// |------------------------------|--------|---------|
+/// | software decode + encode     | 5.52 s | 7.83 s  |
+/// | **VAAPI decode + encode**    | 0.79 s | 1.00 s  |
+/// | VAAPI decode + sw encode     | 6.47 s | 11.63 s |
+///
+/// So the readback penalty grows with frame size, and the answer is end-to-end or not at all.
+///
+/// Probed by actually transcoding a clip, because the encoder being listed proves nothing (every
+/// Linux ffmpeg build compiles `mjpeg_vaapi` in, GPU or no GPU). Cached for the process and logged
+/// once, so a tester's log states the verdict.
+#[cfg(target_os = "linux")]
+pub fn vaapi_render_node() -> Option<&'static str> {
+    static NODE: OnceLock<Option<String>> = OnceLock::new();
+    NODE.get_or_init(|| {
+        let found = probe_vaapi_render_node();
+        match &found {
+            Some(node) => log::warn!(
+                "[ffmpeg] VAAPI hardware H.264-decode + MJPEG-encode: available on {node} — used for the MJPEG transcode"
+            ),
+            None => log::warn!(
+                "[ffmpeg] VAAPI hardware H.264-decode + MJPEG-encode: unavailable — the MJPEG transcode runs in software"
+            ),
+        }
+        found
+    })
+    .as_deref()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn vaapi_render_node() -> Option<&'static str> {
+    None
+}
+
+/// Try each `/dev/dri/renderD*` in turn (multi-GPU boxes number them 128, 129, …) and return the
+/// first that survives a real decode+encode round trip.
+#[cfg(target_os = "linux")]
+fn probe_vaapi_render_node() -> Option<String> {
+    let Some(ff) = find_ffmpeg() else {
+        return None;
+    };
+    let mut nodes: Vec<String> = std::fs::read_dir("/dev/dri")
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with("renderD").then(|| format!("/dev/dri/{name}"))
+        })
+        .collect();
+    nodes.sort();
+    nodes.into_iter().find(|node| probe_vaapi_transcode(&ff, node))
+}
+
+/// Encode a throwaway H.264 clip in software, then run it through the full VAAPI chain: hardware
+/// decode, frames kept in GPU memory (`-hwaccel_output_format vaapi`), hardware MJPEG encode. Any
+/// failure anywhere means "software".
+#[cfg(target_os = "linux")]
+fn probe_vaapi_transcode(ff: &Path, node: &str) -> bool {
+    let clip = std::env::temp_dir().join("kite-vaapi-probe.h264");
+    let clip_arg = clip.to_string_lossy().to_string();
+    let run = |args: &[&str]| -> bool {
+        let mut cmd = Command::new(ff);
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::child_env::sanitize(&mut cmd);
+        matches!(cmd.status(), Ok(s) if s.success())
+    };
+    let made = run(&[
+        "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+        "testsrc=size=320x240:rate=10:duration=1", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-f",
+        "h264", &clip_arg,
+    ]);
+    let ok = made
+        && run(&[
+            "-hide_banner", "-loglevel", "error", "-hwaccel", "vaapi", "-hwaccel_device", node,
+            "-hwaccel_output_format", "vaapi", "-i", &clip_arg, "-c:v", "mjpeg_vaapi", "-f", "null",
+            "-",
+        ]);
+    let _ = std::fs::remove_file(&clip);
+    ok
+}
+
 /// Encode a throwaway clip in software, then decode it back through `h264_v4l2m2m`. Both steps must
 /// succeed; anything else (no ffmpeg, no libx264, no decode device) means "software".
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
 fn probe_v4l2_h264_decode() -> bool {
     let Some(ff) = find_ffmpeg() else {
         return false;

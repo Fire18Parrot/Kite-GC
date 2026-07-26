@@ -23,6 +23,7 @@
     setVideoResolution,
     setCameraFps,
     setVideoMirror,
+    setDisableHwAccel,
     setVideoKind,
     setRtspUrl,
     setRtspTransport,
@@ -257,15 +258,35 @@
     return s.frameRate ? `${curStr}/${Math.round(s.frameRate)}` : curStr;
   });
 
-  // Diagnostic: which capture pipeline is actually live, so it no longer has to be guessed from the
-  // fps format. `mjpegUrl` set = the ffmpeg→MJPEG `<img>` multipart path (software-decoded, the
-  // fallback); otherwise a hardware-composited `<video>` MediaStream (getUserMedia or go2rtc/WebRTC).
-  const pipeline = $derived.by((): { method: string; hw: boolean } | null => {
+  // Diagnostic: what the LIVE feed actually does. Two independent questions, so two badges:
+  //   • transcode — reported by the backend for this stream (`activeTranscode`), never inferred from
+  //     what the host *could* do: an MJPEG camera is stream-copied and a user can force software, so
+  //     "this host has VAAPI" says nothing about the feed in front of you.
+  //   • surface   — `<video>` on a hardware overlay, or an `<img>` rastered with the rest of the page.
+  // A `<video>` feed transcodes nothing (the WebView decodes it), so it shows only the surface badge.
+  const TRANSCODE_LABEL: Record<string, string> = { vaapi: 'VAAPI', v4l2m2m: 'V4L2' };
+  const pipeline = $derived.by(():
+    | { method: string; transcode: string | null; transcodeHw: boolean; surfaceHw: boolean }
+    | null => {
     const s = $videoState;
     if (s.status !== 'live') return null;
-    if (s.mjpegUrl) return { method: s.kind === 'rtsp' ? 'go2rtc → MJPEG' : 'ffmpeg → MJPEG', hw: false };
-    if (s.kind === 'rtsp') return { method: `go2rtc → WebRTC (${s.rtspEngine ?? 'native'})`, hw: true };
-    return { method: 'getUserMedia', hw: true };
+    if (s.mjpegUrl) {
+      const mode = s.activeTranscode;
+      const engine = mode ? TRANSCODE_LABEL[mode] : undefined;
+      const via = engine ?? (mode === 'copy' ? $t('video.pipeline.copy') : undefined);
+      return {
+        method: `${s.kind === 'rtsp' ? 'go2rtc' : 'ffmpeg'} → MJPEG${via ? ` (${via})` : ''}`,
+        transcode: mode,
+        // A stream copy is better than hardware — there is nothing to accelerate — so it counts as
+        // "not costing us anything", not as a software fallback.
+        transcodeHw: !!engine || mode === 'copy',
+        surfaceHw: false,
+      };
+    }
+    if (s.kind === 'rtsp') {
+      return { method: `go2rtc → WebRTC (${s.rtspEngine ?? 'native'})`, transcode: null, transcodeHw: true, surfaceHw: true };
+    }
+    return { method: 'getUserMedia', transcode: null, transcodeHw: true, surfaceHw: true };
   });
 </script>
 
@@ -328,10 +349,25 @@
         · {fpsText} fps
       </div>
       {#if pipeline}
-        <div class="pipeline-line" class:sw={!pipeline.hw}>
+        <div class="pipeline-line" class:sw={!pipeline.transcodeHw}>
           <span class="pl-dot"></span>
           <span class="pl-method">{pipeline.method}</span>
-          <span class="pl-badge">{pipeline.hw ? $t('video.pipeline.hw') : $t('video.pipeline.sw')}</span>
+          <span class="pl-badges">
+            {#if pipeline.transcode}
+              <span class="pl-badge" class:sw={!pipeline.transcodeHw}>
+                {$t('video.pipeline.transcode')}:
+                {pipeline.transcode === 'copy'
+                  ? $t('video.pipeline.copy')
+                  : pipeline.transcodeHw
+                    ? $t('video.pipeline.hw')
+                    : $t('video.pipeline.sw')}
+              </span>
+            {/if}
+            <span class="pl-badge" class:sw={!pipeline.surfaceHw}>
+              {$t('video.pipeline.surface')}:
+              {pipeline.surfaceHw ? $t('video.pipeline.hw') : $t('video.pipeline.sw')}
+            </span>
+          </span>
         </div>
       {/if}
     {/if}
@@ -579,6 +615,18 @@
       <Toggle checked={$videoState.mirror} onchange={(c) => setVideoMirror(c)} id="vp-mirror" />
       <span class="label">{$t('video.mirror')}</span>
     </div>
+
+    <!-- Escape hatch: some driver/hardware combinations pass the backend probe but still misbehave on
+         a live feed. Hardware stays the default; this forces the software transcode. -->
+    <div class="field-row">
+      <Toggle
+        checked={$videoState.disableHwAccel}
+        onchange={(c) => void setDisableHwAccel(c)}
+        id="vp-no-hwaccel"
+      />
+      <span class="label">{$t('video.disableHwAccel')}</span>
+    </div>
+    <p class="hint">{$t('video.disableHwAccelHint')}</p>
   </div>
 {/snippet}
 
@@ -658,17 +706,18 @@
   .pl-dot { width: 7px; height: 7px; border-radius: 50%; background: #4fc47a; flex: 0 0 auto; }
   .pipeline-line.sw .pl-dot { background: #e0a53c; }
   .pl-method { font-variant-numeric: tabular-nums; }
+  .pl-badges { margin-left: auto; display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
   .pl-badge {
-    margin-left: auto;
     padding: 1px 6px;
     border-radius: 3px;
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 0.03em;
+    white-space: nowrap;
     color: #4fc47a;
     background: rgba(79, 196, 122, 0.14);
   }
-  .pipeline-line.sw .pl-badge { color: #e0a53c; background: rgba(224, 165, 60, 0.14); }
+  .pl-badge.sw { color: #e0a53c; background: rgba(224, 165, 60, 0.14); }
 
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field-row { display: flex; align-items: center; gap: 8px; }

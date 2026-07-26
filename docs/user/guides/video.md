@@ -41,11 +41,19 @@ Native additionally reaches devices that only the capture engine can see.
 
 ### Resolution, frame rate and mirror
 
-- **Resolution** — Camera offers Auto / 720p / 1080p; Native offers the device-verified list.
+- **Resolution** — Camera offers Auto / 480p / 720p / 1080p; Native offers the device-verified list.
+- **Format** (Native only) — the capture format the device reports, e.g. MJPEG or a raw one. **MJPEG is
+  the efficient choice**: the picture is passed straight through with no conversion at all.
 - **Frame rate** — Camera offers Auto / 30 / 60 fps; Native offers the frame rates the device reports
-  for the chosen resolution.
+  for the chosen resolution and format.
 - **Mirror** — flip the image horizontally (handy for front-facing cameras). Applies to every place the
   feed is shown.
+- **Disable hardware acceleration** — force the CPU for any stream conversion. Only needed if the
+  picture is broken or unstable with hardware acceleration; the setting is remembered.
+
+While a feed is live the panel names the pipeline underneath the picture, with two labels:
+**Transcode** (`Copy` = nothing is converted · `Hardware` · `Software`) and **Surface** (how the
+picture reaches the screen). `Copy` is the cheapest possible case.
 
 ### RTSP connections, transport and auto-reconnect
 
@@ -135,18 +143,26 @@ work to GStreamer — and which plugins your distribution installs is entirely u
 There are hundreds of combinations of distro, desktop, graphics driver and plugin set, and we cannot
 test or support them all. Concretely, these are things Kite cannot fix from its side:
 
-- **Whether an RTSP stream can be played directly at all.** Several distributions — Raspberry Pi OS
-  among them — ship a browser engine built **without** the direct (WebRTC) video path, and that cannot
-  be installed after the fact. Kite then falls back to a **converted image stream**: it still works, but
-  every frame is decoded and re-encoded, which costs **considerably more CPU** and on a small machine
-  means a stuttering picture at higher resolutions. The effective remedy is to **send a smaller or
-  slower stream from the source** (e.g. 480p instead of 720p, or 30 instead of 60 fps) — that saves the
-  work at every stage at once. Kite records what your system provides in the diagnostic log, so you can
-  see which path you're on (see **[Video troubleshooting](../troubleshooting/video.md)**).
-- **Whether decoding uses the graphics hardware.** Hardware video decoding depends on your driver and
-  the installed plugins, and on some machines it simply isn't available — everything is then done on the
-  CPU. We cannot guarantee hardware decoding on Linux, and single-board computers with no H.264 decoder
-  in hardware (the Raspberry Pi 5, for example) will always decode in software.
+- **Whether an RTSP stream can be played directly at all.** Many Linux systems — Raspberry Pi OS and
+  current Debian desktops among them — run a browser engine that does not expose the direct (WebRTC)
+  video path, and that cannot be installed after the fact. Kite then falls back to a **converted image
+  stream**. It works, but it adds a conversion and an extra hop, so **expect noticeably more latency
+  than on Windows or macOS** — this is the single biggest practical difference. If a smaller delay
+  matters more than resolution, **send a smaller or slower stream from the source** (e.g. 480p instead
+  of 720p, or 30 instead of 60 fps): that saves work at every stage at once.
+- **Whether that conversion uses your graphics hardware.** Kite tests your machine at start-up and uses
+  the GPU for the conversion when it can — on Intel and AMD desktop graphics via VAAPI, and on
+  Raspberry Pi 3/4 class boards via their built-in decoder. Where that works it is a large saving
+  (measured on an Intel laptop: roughly a seventh of the CPU load). But it depends entirely on your
+  driver stack: **NVIDIA cards are not specifically covered**, and any machine whose test fails simply
+  converts on the CPU instead. The Video panel names the path in use, and the diagnostic log records
+  the verdict (see **[Video troubleshooting](../troubleshooting/video.md)**).
+- **A camera that already delivers MJPEG is the best case on Linux.** Nothing is converted at all —
+  the picture is passed through unchanged, which costs almost nothing and gives the lowest delay
+  Linux can offer. If latency is your priority on Linux, prefer an MJPEG source. The Video panel shows
+  **Transcode: Copy** when this applies.
+- **You can force the CPU path.** If hardware conversion misbehaves on your machine, switch on
+  **Disable hardware acceleration** in the Video panel; the setting is remembered.
 - **Local camera quirks.** On Linux the system camera layer can be slow or unresponsive on some setups.
   Kite works around the worst cases (it caps the automatic resolution and frame rate, and routes the
   advanced capture path around that layer entirely), but a camera the system itself can't open cleanly
@@ -158,7 +174,8 @@ test or support them all. Concretely, these are things Kite cannot fix from its 
 None of this means Linux is unusable — a well-equipped desktop distribution generally plays video fine,
 and it is a first-class platform for everything else Kite does. It only means that **if video is your
 priority, Linux is the platform where you may have to do some work yourself**, and we can't promise a
-particular result on a particular machine.
+particular result on a particular machine. In short: **Windows and macOS for maximum compatibility and
+the lowest delay; on Linux, an MJPEG source is the setup that gets closest.**
 
 ## Where to go next
 
