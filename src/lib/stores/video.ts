@@ -19,6 +19,8 @@
 
 import { writable, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
+import { t } from 'svelte-i18n';
+import { isLinux } from '$lib/platform';
 import {
   type NativeDevice,
   type CaptureMode,
@@ -40,6 +42,16 @@ export type CameraFps = 'auto' | '30' | '60';
 export type VideoKind = 'camera' | 'rtsp' | 'native';
 /** Which go2rtc reader served the live RTSP feed: native client or the ffmpeg fallback. */
 export type RtspEngine = 'native' | 'ffmpeg' | null;
+/** RTSP transport for a connection. 'udp' → ffmpeg reader (reads UDP-only servers like the UAV-Link
+ *  Pi); 'tcp' → go2rtc's native RTP-over-TCP client; 'auto' → native first, then the ffmpeg fallback. */
+export type RtspTransport = 'udp' | 'tcp' | 'auto';
+/** A saved, named RTSP connection the user can recall from the connection list (see VideoPanel). */
+export interface RtspConnection {
+  id: string;
+  name: string;
+  url: string;
+  transport: RtspTransport;
+}
 /** Where the single map instance currently lives (the inverse of which surfaces show video). */
 export type MapLocation = 'main' | 'floating' | 'widget';
 
@@ -61,15 +73,26 @@ export interface VideoState {
   nativeDevices: NativeDevice[];
   /** Selected native device id (V4L2 path / DirectShow name / AVFoundation index), null if none. */
   nativeDevice: string | null;
+  /** Name of the selected native device — the tie-breaker when the id turns out to be unstable
+   *  (AVFoundation index / `/dev/videoN` both renumber on re-plug). See `resolveNativeDevice`. */
+  nativeDeviceName: string | null;
   /** Probed modes for the selected native device (drives the format→resolution→framerate cascade). */
   nativeModes: CaptureMode[];
   /** Chosen native capture config (format/resolution/framerate). */
   nativeSel: NativeSelection;
   // ── RTSP source ──────────────────────────────────────────────────
-  /** RTSP URL (e.g. rtsp://192.168.1.10:554/live). */
+  /** RTSP URL (e.g. rtsp://192.168.1.10:554/live) — the active/direct-connect URL. */
   rtspUrl: string;
+  /** Transport for the active RTSP connection (udp/tcp/auto). */
+  rtspTransport: RtspTransport;
+  /** Saved, named RTSP connections the user can recall (explicit save — never auto-added). */
+  rtspConnections: RtspConnection[];
   /** Active RTSP reader once live (native go2rtc client vs ffmpeg fallback); runtime-only. */
   rtspEngine: RtspEngine;
+  /** Runtime-only: true while the infinite RTSP auto-reconnect loop is running (link dropped/stalled). */
+  reconnecting: boolean;
+  /** Runtime-only: current reconnect attempt number, shown in the on-video overlay. */
+  reconnectAttempt: number;
   /** go2rtc MJPEG HTTP URL for systems where RTCPeerConnection is unavailable. */
   mjpegUrl: string | null;
   /** Mirror horizontally (front-facing cams) — applied by the display sinks. */
@@ -116,8 +139,11 @@ interface VideoPrefs {
   resolution: VideoResolution;
   cameraFps: CameraFps;
   rtspUrl: string;
+  rtspTransport: RtspTransport;
+  rtspConnections: RtspConnection[];
   nativeDevice: string | null;
   nativeCodec: string;
+  nativeDeviceName: string | null;
   nativeWidth: number;
   nativeHeight: number;
   nativeFps: number;
@@ -136,8 +162,11 @@ const PREF_DEFAULTS: VideoPrefs = {
   resolution: 'auto',
   cameraFps: 'auto',
   rtspUrl: '',
+  rtspTransport: 'auto',
+  rtspConnections: [],
   nativeDevice: null,
   nativeCodec: 'mjpeg',
+  nativeDeviceName: null,
   nativeWidth: 1280,
   nativeHeight: 720,
   nativeFps: 30,
@@ -164,8 +193,11 @@ function loadPrefs(): VideoPrefs {
         resolution: p.resolution ?? 'auto',
         cameraFps: p.cameraFps ?? 'auto',
         rtspUrl: p.rtspUrl ?? '',
+        rtspTransport: p.rtspTransport ?? 'auto',
+        rtspConnections: Array.isArray(p.rtspConnections) ? p.rtspConnections : [],
         nativeDevice: p.nativeDevice ?? p.v4l2Device ?? null,
         nativeCodec: p.nativeCodec ?? 'mjpeg',
+        nativeDeviceName: p.nativeDeviceName ?? null,
         nativeWidth: p.nativeWidth ?? 1280,
         nativeHeight: p.nativeHeight ?? 720,
         nativeFps: p.nativeFps ?? 30,
@@ -190,8 +222,11 @@ function savePrefs(): void {
         resolution: s.resolution,
         cameraFps: s.cameraFps,
         rtspUrl: s.rtspUrl,
+        rtspTransport: s.rtspTransport,
+        rtspConnections: s.rtspConnections,
         nativeDevice: s.nativeDevice,
         nativeCodec: s.nativeSel.codec,
+        nativeDeviceName: s.nativeDeviceName,
         nativeWidth: s.nativeSel.width,
         nativeHeight: s.nativeSel.height,
         nativeFps: s.nativeSel.fps,
@@ -220,6 +255,7 @@ const INITIAL: VideoState = {
   cameraFps: boot.cameraFps,
   nativeDevices: [],
   nativeDevice: boot.nativeDevice,
+  nativeDeviceName: boot.nativeDeviceName,
   nativeModes: [],
   nativeSel: {
     codec: boot.nativeCodec,
@@ -228,7 +264,11 @@ const INITIAL: VideoState = {
     fps: boot.nativeFps,
   },
   rtspUrl: boot.rtspUrl,
+  rtspTransport: boot.rtspTransport,
+  rtspConnections: boot.rtspConnections,
   rtspEngine: null,
+  reconnecting: false,
+  reconnectAttempt: 0,
   mjpegUrl: null,
   mirror: boot.mirror,
   aspect: 16 / 9,
@@ -257,8 +297,49 @@ export const videoState = writable<VideoState>({ ...INITIAL });
  */
 export const videoStream = writable<MediaStream | null>(null);
 
+/** Per-second snapshot of the WebRTC inbound video pipeline, published by the RTSP stall monitor
+ *  (which polls `getStats()` once a second anyway). Splits an unstable picture into its stages:
+ *  `recvFps` (frames arriving from go2rtc — a shortfall here is upstream of the WebView),
+ *  `decodeFps`/`framesDropped` (decoder keeping up or not), and the engine's own playout counters
+ *  (`freezeCount`, `playoutDelayMs`). Consumed by the Debug Monitor's Video tab; null when no
+ *  WebRTC feed is running. */
+export interface VideoRtcStats {
+  /** framesReceived per second over the last poll interval. */
+  recvFps: number;
+  /** framesDecoded per second over the last poll interval. */
+  decodeFps: number;
+  /** The decoder's own frames-per-second estimate, when the engine reports one. */
+  engineFps: number | null;
+  /** Cumulative frames dropped before presentation (received but never shown). */
+  framesDropped: number;
+  /** Cumulative RTP packets lost on the (loopback) transport — anything but 0 is remarkable. */
+  packetsLost: number;
+  /** Cumulative playout freezes counted by the engine, if reported. */
+  freezeCount: number | null;
+  /** Total frozen time in ms, if reported. */
+  freezeMs: number | null;
+  /** RFC 3550 interarrival jitter in ms, if reported. */
+  jitterMs: number | null;
+  /** Average jitter-buffer (playout) delay per emitted frame in ms, if reported. */
+  playoutDelayMs: number | null;
+}
+export const videoRtcStats = writable<VideoRtcStats | null>(null);
+
 function patch(p: Partial<VideoState>): void {
   videoState.update((s) => ({ ...s, ...p }));
+}
+
+/** Mirror a video-pipeline event into the **backend log file** (and the console).
+ *
+ *  The whole source router — including the RTSP reconnect loop and its stall detection — runs here in
+ *  the frontend, so until now the answer to "why did the stream drop?" existed only as a `console.warn`
+ *  in DevTools. A tester on a Raspberry Pi has neither: a release build has no console, and the log file
+ *  the Diagnostics page hands out never saw a word of it. Stream aborts go in at **warn**, so they show
+ *  up at the default log level; routine lifecycle detail is `info` (captured at Debug). */
+function logVideo(level: 'warn' | 'info' | 'debug', message: string): void {
+  if (level === 'warn') console.warn(`[video] ${message}`);
+  else console.log(`[video] ${message}`);
+  void invoke('log_frontend', { level, area: 'video', message }).catch(() => {});
 }
 
 /** Bind a sink's `<video>` element to the shared MediaStream (camera or rtsp). */
@@ -271,6 +352,11 @@ export function bindVideoEl(el: HTMLVideoElement | null, stream: MediaStream | n
  *  floating window / widget can size to the real aspect ratio (RTSP has no upfront caps). */
 export function reportVideoSize(width: number, height: number): void {
   if (!width || !height) return;
+  rtspMjpegFailures = 0; // a frame was decoded → whatever decoder is in use is working
+  // Change-guarded: the MJPEG `<img>` path reports from onload, which SOME engines fire per multipart
+  // frame — an unguarded patch would churn the store at frame rate.
+  const s = get(videoState);
+  if (s.width === width && s.height === height) return;
   patch({ width, height, aspect: width / height });
 }
 
@@ -360,22 +446,45 @@ export async function enumerateVideoDevices(): Promise<void> {
   }
 }
 
-/** Enumerate native capture devices via the Rust backend (V4L2/DirectShow/AVFoundation). */
+/** Re-resolve the persisted native device against a fresh enumeration.
+ *
+ *  Device ids are only stable up to a point: AVFoundation hands out a running **index** (`"0"`, `"1"`)
+ *  and V4L2 a `/dev/videoN` path — both renumber when hardware is re-plugged or the machine reboots, so
+ *  a saved id can silently denote a *different* camera. Checking "does the id still exist" (the old
+ *  behaviour) can't see that. The saved name is the tie-breaker: keep the id while it still names the
+ *  same device, otherwise follow the name to its new id, and only fall back to the first device when
+ *  neither matches. */
+function resolveNativeDevice(
+  devices: NativeDevice[],
+  id: string | null,
+  name: string | null,
+): NativeDevice | null {
+  if (devices.length === 0) return null;
+  const byId = id ? devices.find((d) => d.id === id) : undefined;
+  if (byId && (!name || byId.name === name)) return byId;
+  const byName = name ? devices.find((d) => d.name === name) : undefined;
+  return byName ?? byId ?? devices[0];
+}
+
+/** Enumerate native capture devices via the Rust backend (V4L2/DirectShow/AVFoundation), then repair
+ *  the persisted selection against the fresh list (see `resolveNativeDevice`). */
 export async function enumerateNativeDevices(): Promise<void> {
   try {
     const devices = await invoke<NativeDevice[]>('video_list_native_devices');
     patch({ nativeDevices: devices });
-    // Auto-select + probe the first device if none selected yet, else (re)probe the current one; drop
-    // a stale selection.
-    const sel = get(videoState).nativeDevice;
-    if (devices.length > 0) {
-      if (!sel || !devices.some((d) => d.id === sel)) {
-        await setNativeDevice(devices[0].id);
-      } else {
-        await probeNativeDevice(sel);
-      }
-    } else if (sel) {
-      patch({ nativeDevice: null, nativeModes: [] });
+    const st = get(videoState);
+    const want = resolveNativeDevice(devices, st.nativeDevice, st.nativeDeviceName);
+    if (!want) {
+      if (st.nativeDevice) patch({ nativeDevice: null, nativeDeviceName: null, nativeModes: [] });
+      return;
+    }
+    if (want.id !== st.nativeDevice) {
+      // Genuinely a different device (first run, hardware swapped, or the id moved) → full switch.
+      await setNativeDevice(want.id);
+    } else {
+      // Same device: only backfill the name (nothing to restart) and refresh its modes.
+      if (want.name !== st.nativeDeviceName) patch({ nativeDeviceName: want.name });
+      await probeNativeDevice(want.id);
     }
   } catch {
     // Native capture not available (no ffmpeg / unsupported platform) — that's fine.
@@ -422,6 +531,7 @@ function closeRtc(): void {
   } catch {
     /* ignore */
   }
+  videoRtcStats.set(null);
 }
 
 /** Resolve once ICE gathering completes (or a short timeout) — HTTP signaling can't trickle,
@@ -497,7 +607,7 @@ export async function startVideo(): Promise<void> {
 
 /** Register the source with go2rtc and complete one WebRTC negotiation. Throws on failure. */
 async function negotiateWebrtc(url: string, useFfmpeg: boolean): Promise<void> {
-  await invoke('video_webrtc_start', { url, useFfmpeg });
+  await invoke('video_webrtc_start', { url, useFfmpeg, mjpeg: false });
 
   const pc = new RTCPeerConnection({ iceServers: [] });
   rtcConn = pc;
@@ -509,8 +619,10 @@ async function negotiateWebrtc(url: string, useFfmpeg: boolean): Promise<void> {
     patch({ status: 'live', error: null });
   };
   pc.onconnectionstatechange = () => {
-    if (rtcConn === pc && (pc.connectionState === 'failed' || pc.connectionState === 'closed')) {
-      patch({ status: 'error', error: `WebRTC ${pc.connectionState}` });
+    // A genuine drop (failed) enters the infinite reconnect loop; 'closed' is our own teardown.
+    if (rtcConn === pc && pc.connectionState === 'failed') {
+      logVideo('warn', 'WebRTC peer connection failed');
+      scheduleRtspReconnect();
     }
   };
   const offer = await pc.createOffer();
@@ -525,46 +637,321 @@ async function negotiateWebrtc(url: string, useFfmpeg: boolean): Promise<void> {
   patch({ rtspEngine: useFfmpeg ? 'ffmpeg' : 'native' });
 }
 
-/** Open (or re-open) the RTSP feed via go2rtc. Uses WebRTC when available,
- *  falls back to MJPEG over HTTP when RTCPeerConnection is missing. */
-export async function startRtsp(): Promise<void> {
+// ── RTSP auto-reconnect (infinite until frames return or the user stops) ──────────────────────────
+// The UAV-Link Pi is UDP-only with a "session lottery" (its FPS-watchdog EOSes bad sessions), and a
+// flying aircraft can drop into a radio hole. So the client reconnects INDEFINITELY and visibly until
+// frames flow again — only an explicit stop ends it. Trigger: a frame timeout (no new frames/bytes on
+// the WebRTC inbound track for RTSP_STALL_MS). UDP stays (latency over resends, per the UAV-Link design).
+// Two-phase stall detection (LTE-tested against the UAV-Link Pi):
+// - CONNECT phase (no frame seen yet): a fresh session that delivers nothing is a losing ticket in
+//   the server's session lottery → re-roll fast (also beats the Pi watchdog's ~10 s kill window).
+// - LIVE phase (frames were flowing): brief UDP gaps (LTE fluctuation) recover in-stream on their
+//   own — only a sustained silence means the session really died (watchdog EOS / radio hole).
+const RTSP_STALL_CONNECT_MS = 4000;
+const RTSP_STALL_LIVE_MS = 10_000;
+const RTSP_RECONNECT_BACKOFF_MS = 1500;
+let rtspMonitor: ReturnType<typeof setInterval> | undefined;
+let rtspReconnectTimer: ReturnType<typeof setTimeout> | undefined;
+/** Consecutive MJPEG `<img>` failures on the RTSP feed; resets as soon as frames arrive. Used to
+ *  give up on the hardware decoder rather than loop forever on a host it doesn't work on. */
+let rtspMjpegFailures = 0;
+
+function clearRtspTimers(): void {
+  if (rtspMonitor) { clearInterval(rtspMonitor); rtspMonitor = undefined; }
+  if (rtspReconnectTimer) { clearTimeout(rtspReconnectTimer); rtspReconnectTimer = undefined; }
+}
+
+/** Watch the inbound WebRTC stats; if frames/bytes stop advancing the link has stalled → reconnect.
+ *  Two-phase: 4 s until the FIRST frames arrive (dead session → re-roll fast), 10 s once the stream
+ *  was delivering (tolerate transient UDP gaps before a full reconnect). */
+function startRtspStallMonitor(pc: RTCPeerConnection): void {
+  if (rtspMonitor) clearInterval(rtspMonitor);
+  let last = -1;
+  let sawFrames = false;
+  let lastChange = performance.now();
+  let warnedNoReport = false;
+  let prevFrames = -1;
+  let prevDecoded = 0;
+  let prevAt = performance.now();
+  let statTick = 0;
+  videoRtcStats.set(null);
+  rtspMonitor = setInterval(() => {
+    if (rtcConn !== pc) { if (rtspMonitor) { clearInterval(rtspMonitor); rtspMonitor = undefined; } return; }
+    void pc.getStats().then((stats) => {
+      if (rtcConn !== pc) return;
+      let frames = 0;
+      let bytes = 0;
+      let decoded = 0;
+      let dropped = 0;
+      let lost = 0;
+      let engineFps: number | null = null;
+      let freezes: number | null = null;
+      let freezeMs: number | null = null;
+      let jitterMs: number | null = null;
+      let playoutMs: number | null = null;
+      let sawReport = false;
+      stats.forEach((report) => {
+        if (report.type !== 'inbound-rtp') return;
+        // WebKit has historically reported the legacy `mediaType` instead of the spec's `kind`, and a
+        // report carrying neither is counted too: mistaking a healthy feed for a dead one would put the
+        // stream into a permanent reconnect loop, which is far worse than a missed stall.
+        // The pipeline-quality fields beyond framesReceived/bytesReceived are optional per spec and
+        // engine-dependent — each is read defensively and shown as absent when not reported.
+        const rr = report as RTCInboundRtpStreamStats & {
+          mediaType?: string;
+          framesDecoded?: number;
+          framesDropped?: number;
+          framesPerSecond?: number;
+          freezeCount?: number;
+          totalFreezesDuration?: number;
+          jitter?: number;
+          jitterBufferDelay?: number;
+          jitterBufferEmittedCount?: number;
+          packetsLost?: number;
+        };
+        const kind = rr.kind ?? rr.mediaType;
+        if (kind && kind !== 'video') return;
+        sawReport = true;
+        frames += rr.framesReceived ?? 0;
+        bytes += rr.bytesReceived ?? 0;
+        decoded += rr.framesDecoded ?? 0;
+        dropped += rr.framesDropped ?? 0;
+        lost += rr.packetsLost ?? 0;
+        if (rr.framesPerSecond !== undefined) engineFps = rr.framesPerSecond;
+        if (rr.freezeCount !== undefined) freezes = rr.freezeCount;
+        if (rr.totalFreezesDuration !== undefined) freezeMs = rr.totalFreezesDuration * 1000;
+        if (rr.jitter !== undefined) jitterMs = rr.jitter * 1000;
+        if (rr.jitterBufferDelay !== undefined && rr.jitterBufferEmittedCount) {
+          playoutMs = (rr.jitterBufferDelay / rr.jitterBufferEmittedCount) * 1000;
+        }
+      });
+      if (!sawReport) {
+        // No inbound stats at all — we cannot measure, so we must not judge. Say so once.
+        if (!warnedNoReport) {
+          warnedNoReport = true;
+          logVideo('warn', 'RTSP stall monitor: no inbound-rtp stats from this WebView — stall detection is inactive');
+        }
+        return;
+      }
+      const progress = frames || bytes;
+      const now = performance.now();
+      // Publish the per-second pipeline snapshot (needs two polls for the rates).
+      if (prevFrames >= 0) {
+        const dt = (now - prevAt) / 1000;
+        if (dt > 0) {
+          videoRtcStats.set({
+            recvFps: Math.max(0, (frames - prevFrames) / dt),
+            decodeFps: Math.max(0, (decoded - prevDecoded) / dt),
+            engineFps,
+            framesDropped: dropped,
+            packetsLost: lost,
+            freezeCount: freezes,
+            freezeMs,
+            jitterMs,
+            playoutDelayMs: playoutMs,
+          });
+        }
+      }
+      prevFrames = frames;
+      prevDecoded = decoded;
+      prevAt = now;
+      // A periodic trace of the same numbers, so a tester's Debug-level log shows where a jittery
+      // picture loses its frames (receive vs decode vs playout) without the Debug Monitor.
+      statTick++;
+      if (statTick % 10 === 0) {
+        // Helper instead of inline ternaries: TS does not apply assignments made inside the forEach
+        // callback to the outer flow, so `x !== null` on these would narrow to `never`.
+        const ms = (v: number | null, digits = 0): string => (v === null ? '–' : `${v.toFixed(digits)}ms`);
+        logVideo(
+          'debug',
+          `RTC inbound: recv=${frames} decoded=${decoded} dropped=${dropped} lost=${lost}` +
+            ` freezes=${freezes ?? '–'}/${ms(freezeMs)} jitter=${ms(jitterMs, 1)} playoutDelay=${ms(playoutMs)}`,
+        );
+      }
+      if (progress !== last) {
+        if (last >= 0 && progress > last) sawFrames = true; // real advance, not the initial read
+        last = progress;
+        lastChange = now;
+      } else if (now - lastChange > (sawFrames ? RTSP_STALL_LIVE_MS : RTSP_STALL_CONNECT_MS)) {
+        // The frames/bytes pair is the diagnosis: bytes > 0 with frames == 0 means the media arrives
+        // but nothing decodes it (a missing H.264 decoder in the WebView's GStreamer stack); bytes == 0
+        // means nothing arrives at all (transport / source).
+        logVideo(
+          'warn',
+          `RTSP stalled after ${((now - lastChange) / 1000).toFixed(1)}s ` +
+            `(${sawFrames ? 'live feed went silent' : 'no first frame'}; ` +
+            `framesReceived=${frames} bytesReceived=${bytes}) — reconnecting`,
+        );
+        scheduleRtspReconnect();
+      }
+    }).catch(() => {});
+  }, 1000);
+}
+
+/** Enter/continue the infinite reconnect loop: mark the visible reconnecting state and re-attempt
+ *  after a short backoff. Guarded so an explicit stop (kind changed / disabled) ends it. */
+function scheduleRtspReconnect(): void {
+  const st = get(videoState);
+  if (st.kind !== 'rtsp' || !st.enabled) return; // user stopped → do not reconnect
+  // The loop is unbounded by design, so logging every attempt would fill the file on a source that
+  // never comes back. Log the first few, then every tenth — enough to see it is still going.
+  const attempt = st.reconnectAttempt + 1;
+  if (attempt <= 3 || attempt % 10 === 0) {
+    logVideo('warn', `RTSP reconnect attempt ${attempt} (${st.rtspUrl}, transport=${st.rtspTransport})`);
+  }
+  clearRtspTimers();
+  closeRtc();
+  videoStream.set(null);
+  patch({
+    reconnecting: true,
+    reconnectAttempt: st.reconnectAttempt + 1,
+    status: 'starting',
+    rtspEngine: null,
+    mjpegUrl: null,
+  });
+  rtspReconnectTimer = setTimeout(() => { void startRtsp({ reconnect: true }); }, RTSP_RECONNECT_BACKOFF_MS);
+}
+
+/** Negotiate the RTSP source honouring the connection's transport: udp → ffmpeg reader (reads
+ *  UDP-only servers like the UAV-Link Pi); tcp → native go2rtc client; auto → native, then ffmpeg. */
+async function negotiateRtsp(url: string, transport: RtspTransport): Promise<void> {
+  if (transport === 'udp') {
+    await negotiateWebrtc(url, true);
+  } else if (transport === 'tcp') {
+    await negotiateWebrtc(url, false);
+  } else {
+    try {
+      await negotiateWebrtc(url, false); // native go2rtc RTSP client
+    } catch (nativeErr) {
+      logVideo('warn', `native go2rtc RTSP reader failed, retrying via ffmpeg: ${nativeErr instanceof Error ? nativeErr.message : String(nativeErr)}`);
+      closeRtc();
+      if (get(videoState).kind !== 'rtsp' || !get(videoState).enabled) return; // stopped meanwhile
+      await negotiateWebrtc(url, true); // ffmpeg reader fallback
+    }
+  }
+}
+
+/** Open (or re-open) the RTSP feed via go2rtc, honouring the active transport. Once live, a stall
+ *  monitor watches for frame timeouts; any failure/drop enters the infinite reconnect loop (until
+ *  frames return or the user stops). `reconnect` distinguishes a loop retry from a fresh start. */
+export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
+  const reconnect = opts?.reconnect ?? false;
+  clearRtspTimers();
   stopTracks(); // release the camera / previous peer connection
   const st = get(videoState);
   const url = st.rtspUrl.trim();
+  const transport = st.rtspTransport;
   if (!url) {
-    patch({ kind: 'rtsp', enabled: true, status: 'error', error: 'No RTSP URL' });
+    patch({ kind: 'rtsp', enabled: true, status: 'error', error: 'No RTSP URL', reconnecting: false, reconnectAttempt: 0 });
     return;
   }
-  patch({ kind: 'rtsp', enabled: true, status: 'starting', error: null, rtspEngine: null, mjpegUrl: null });
-  savePrefs();
+  patch({
+    kind: 'rtsp',
+    enabled: true,
+    status: 'starting',
+    error: null,
+    rtspEngine: null,
+    mjpegUrl: null,
+    ...(reconnect ? {} : { reconnecting: false, reconnectAttempt: 0 }),
+  });
+  if (!reconnect) {
+    savePrefs();
+    rtspMjpegFailures = 0; // a deliberate (re)start gets the hardware decoder another chance
+  }
 
-  // MJPEG fallback: register the source (go2rtc handles RTSP natively) and use its HTTP endpoint.
+  if (!reconnect) {
+    // A missing engine cannot be fixed by retrying, so it must not enter the loop: before this, an
+    // auto-start without go2rtc installed produced an endless "Reconnecting… (n)" with no explanation
+    // (seen on the Pi). Checked once per fresh start — a reconnect attempt inherits the verdict.
+    const engine = await invoke<string | null>('video_go2rtc_status').catch(() => null);
+    if (!engine) {
+      logVideo('warn', 'RTSP start aborted: the go2rtc engine is not installed');
+      patch({ status: 'error', error: get(t)('video.engineMissing'), reconnecting: false, reconnectAttempt: 0 });
+      return;
+    }
+    logVideo(
+      'info',
+      `RTSP start ${url} (transport=${transport}, webrtc=${isWebrtcAvailable()}, engine=${engine})`,
+    );
+  }
+
+  // MJPEG fallback for webviews without RTCPeerConnection (rare in Tauri). Reader choice: keep the
+  // native go2rtc client for auto/tcp (the pre-connection-list behaviour — works without ffmpeg);
+  // only an explicit UDP selection routes through the ffmpeg reader (needs ffmpeg, like the normal
+  // UDP path).
   if (!isWebrtcAvailable()) {
+    // Degraded mode, and a silent one: it needs go2rtc to transcode to MJPEG and a WebView that renders
+    // multipart images. Worth a warning every time, not just a console line.
+    if (!reconnect) {
+      logVideo('warn', 'WebRTC is unavailable in this WebView — falling back to the MJPEG image path');
+    }
+    // Serving MJPEG means go2rtc has to TRANSCODE (an H.264 camera carries no MJPEG track), and that
+    // needs ffmpeg. Missing ffmpeg makes the endpoint fail instantly — a dead end no reconnect fixes.
+    const ffmpeg = await invoke<string | null>('video_ffmpeg_status').catch(() => null);
+    if (!ffmpeg) {
+      logVideo('warn', 'MJPEG fallback needs ffmpeg for transcoding and it is not installed');
+      patch({ status: 'error', error: get(t)('video.ffmpegNativeMissing'), reconnecting: false, reconnectAttempt: 0 });
+      return;
+    }
     try {
-      // Start the stream with go2rtc's native client (no WebRTC needed)
-      await invoke('video_webrtc_start', { url, useFfmpeg: false });
+      // Hardware H.264 decoding (Pi 3/4 class boards) is the backend's call — but only while this
+      // feed has actually been delivering. Two failures in a row and we ask for the software decoder,
+      // so a host that passes the backend's probe yet can't hold a live stream on the hardware path
+      // still ends up with a picture instead of an endless reconnect loop.
+      await invoke('video_webrtc_start', {
+        url,
+        useFfmpeg: transport === 'udp',
+        mjpeg: true,
+        allowHwDecode: rtspMjpegFailures < 2,
+      });
       const mjpegUrl = await buildMjpegUrl();
-      patch({ status: 'live', mjpegUrl, error: null, rtspEngine: 'native' });
+      // 'ffmpeg', always: an MJPEG source is registered as `ffmpeg:…#video=mjpeg` regardless of the
+      // transport, because go2rtc's native reader cannot transcode. Reporting 'native' here told the
+      // panel (and the tester) the opposite of what was running.
+      patch({ status: 'live', mjpegUrl, error: null, rtspEngine: 'ffmpeg', reconnecting: false, reconnectAttempt: 0 });
     } catch (e) {
-      closeRtc();
-      patch({ status: 'error', error: e instanceof Error ? e.message : String(e) });
+      logVideo('warn', `RTSP (MJPEG fallback) failed: ${e instanceof Error ? e.message : String(e)}`);
+      scheduleRtspReconnect();
     }
     return;
   }
 
   try {
-    await negotiateWebrtc(url, false); // native go2rtc RTSP client
-  } catch (nativeErr) {
-    console.warn('[video] native go2rtc RTSP failed, retrying via ffmpeg', nativeErr);
-    closeRtc();
-    if (get(videoState).status === 'off') return; // stopped meanwhile
-    try {
-      await negotiateWebrtc(url, true); // ffmpeg reader fallback
-    } catch (ffmpegErr) {
-      closeRtc();
-      patch({ status: 'error', error: ffmpegErr instanceof Error ? ffmpegErr.message : String(ffmpegErr) });
-    }
+    // Hard cap on one attempt: the backend invokes are bounded (10/15 s reqwest timeouts), but if
+    // any path ever hangs anyway, the loop must keep cycling instead of freezing mid-"Reconnecting…"
+    // (a wedged RTSP server once parked go2rtc's answer indefinitely — observed with the UAV-Link Pi).
+    await Promise.race([
+      negotiateRtsp(url, transport),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('RTSP negotiation timeout')), 20_000),
+      ),
+    ]);
+    if (get(videoState).kind !== 'rtsp' || !get(videoState).enabled) return; // stopped during negotiation
+    patch({ reconnecting: false, reconnectAttempt: 0 });
+    if (rtcConn) startRtspStallMonitor(rtcConn);
+  } catch (err) {
+    logVideo('warn', `RTSP connect failed: ${err instanceof Error ? err.message : String(err)}`);
+    scheduleRtspReconnect();
   }
+}
+
+/** A sink's MJPEG `<img>` failed to load. Unlike the WebRTC path there are no stats to poll on a
+ *  multipart feed — the element's own `error` event is the ONLY signal that it died, or that this
+ *  WebView can't render `multipart/x-mixed-replace` at all. Without this the feed just showed the
+ *  WebView's broken-image placeholder while the app still claimed to be `live` (reported on Debian /
+ *  WebKitGTK). RTSP re-enters the reconnect loop; native capture has no remote to retry, so it reports
+ *  an error. Idempotent — every sink fires it, and the first one to arrive does the work. */
+export function reportMjpegError(): void {
+  const st = get(videoState);
+  if (!st.enabled || !st.mjpegUrl) return;
+  if (st.kind === 'rtsp') {
+    logVideo('warn', `MJPEG image failed to load (${st.mjpegUrl}) — reconnecting`);
+    rtspMjpegFailures++;
+    scheduleRtspReconnect();
+    return;
+  }
+  logVideo('warn', `MJPEG image failed to load (${st.mjpegUrl})`);
+  patch({ status: 'error', mjpegUrl: null, error: get(t)('video.mjpegLoadFailed') });
 }
 
 /** Open a native capture device via ffmpeg → the embedded MJPEG server → `<img>`. This path is
@@ -573,6 +960,11 @@ export async function startRtsp(): Promise<void> {
  *  where the browser's capture stack is flaky. Software `<img>` decode is the trade-off. */
 export async function startNative(): Promise<void> {
   stopTracks();
+  // Release a previous MJPEG capture FIRST. Its ffmpeg holds the device exclusively (DirectShow
+  // always, V4L2 usually), so leaving it running makes the re-open below fail with a busy device —
+  // which is exactly what a format/resolution/framerate change does: stop, then start with the new
+  // capture spec.
+  await stopNativeMjpeg();
   const st = get(videoState);
   const id = st.nativeDevice;
   if (!id) {
@@ -609,12 +1001,13 @@ export function startActive(): Promise<void> {
 /** Stop the source and release the camera / go2rtc engine. */
 export function stopVideo(): void {
   const wasBackend = get(videoState).kind === 'rtsp' || get(videoState).kind === 'native';
+  clearRtspTimers(); // end the RTSP reconnect loop on an explicit stop
   stopTracks();
   if (wasBackend) {
     void invoke('video_webrtc_stop').catch(() => {});
     void stopNativeMjpeg();
   }
-  patch({ enabled: false, status: 'off', error: null, rtspEngine: null, mjpegUrl: null });
+  patch({ enabled: false, status: 'off', error: null, rtspEngine: null, mjpegUrl: null, reconnecting: false, reconnectAttempt: 0 });
   savePrefs();
 }
 
@@ -638,9 +1031,74 @@ export function setRtspUrl(rtspUrl: string): void {
   savePrefs();
 }
 
-/** Switch native device: probe it, repair the selection, restart if live. */
+/** Set the active RTSP transport (udp/tcp/auto); restart if currently on a live RTSP feed. */
+export async function setRtspTransport(transport: RtspTransport): Promise<void> {
+  patch({ rtspTransport: transport });
+  savePrefs();
+  const st = get(videoState);
+  if (st.enabled && st.kind === 'rtsp') await startRtsp();
+}
+
+function genRtspId(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `rtsp-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+  }
+}
+
+/** Save the current URL + transport as a named entry in the connection list. Explicit action only —
+ *  connections are NEVER auto-saved. Name defaults to the host (rename inline); dedupes by URL. */
+export function saveRtspConnection(): void {
+  const st = get(videoState);
+  const url = st.rtspUrl.trim();
+  if (!url) return;
+  let host = url;
+  try {
+    host = new URL(url).host || url;
+  } catch {
+    /* keep the raw url as the name */
+  }
+  const list = st.rtspConnections.slice();
+  const i = list.findIndex((c) => c.url === url);
+  if (i >= 0) {
+    list[i] = { ...list[i], transport: st.rtspTransport };
+  } else {
+    list.push({ id: genRtspId(), name: host, url, transport: st.rtspTransport });
+  }
+  patch({ rtspConnections: list });
+  savePrefs();
+}
+
+/** Edit a saved connection (name / url / transport). */
+export function updateRtspConnection(id: string, p: Partial<Omit<RtspConnection, 'id'>>): void {
+  const list = get(videoState).rtspConnections.map((c) => (c.id === id ? { ...c, ...p } : c));
+  patch({ rtspConnections: list });
+  savePrefs();
+}
+
+/** Remove a saved connection. */
+export function removeRtspConnection(id: string): void {
+  const list = get(videoState).rtspConnections.filter((c) => c.id !== id);
+  patch({ rtspConnections: list });
+  savePrefs();
+}
+
+/** Load a saved connection into the active URL + transport and connect it. */
+export async function selectRtspConnection(id: string): Promise<void> {
+  const c = get(videoState).rtspConnections.find((x) => x.id === id);
+  if (!c) return;
+  if (get(videoState).kind !== 'rtsp' && get(videoState).enabled) stopVideo();
+  patch({ kind: 'rtsp', rtspUrl: c.url, rtspTransport: c.transport });
+  savePrefs();
+  await startRtsp();
+}
+
+/** Switch native device: probe it, repair the selection, restart if live. The device *name* is stored
+ *  alongside the id so an unstable id (AVFoundation index / `/dev/videoN`) can be re-resolved later. */
 export async function setNativeDevice(id: string | null): Promise<void> {
-  patch({ nativeDevice: id });
+  const name = id ? (get(videoState).nativeDevices.find((d) => d.id === id)?.name ?? null) : null;
+  patch({ nativeDevice: id, nativeDeviceName: name });
   if (id) await probeNativeDevice(id);
   else patch({ nativeModes: [] });
   savePrefs();
@@ -782,12 +1240,50 @@ export async function enterPiP(): Promise<void> {
   }
 }
 
+/** Delay before auto-starting the Linux `camera` source, so the UI paints first (see `initVideo`). */
+const LINUX_CAMERA_AUTOSTART_DELAY_MS = 1200;
+
+/** One-time record of what this WebView can actually play. WebRTC decides the entire video strategy —
+ *  with it, H.264 goes straight to the decoder; without it, the expensive MJPEG transcode is the only
+ *  way — and on Linux that varies by distro and build in ways nothing else reveals.
+ *  `webkitRTCPeerConnection` is checked too, so a merely *prefixed* implementation can't masquerade as
+ *  "no WebRTC at all". MediaSource/captureStream are logged because they were the third candidate path
+ *  (fMP4 into the WebView's own decoder): WebKitGTK has MediaSource but **no** `captureStream`, so an
+ *  MSE-driven element cannot be published to Kite's shared multi-sink stream — that is why the path was
+ *  built, measured to never once engage on a Pi, and removed again. */
+function logWebViewMediaSupport(): void {
+  const has = (name: string) => name in globalThis;
+  logVideo(
+    'info',
+    `WebView media support: RTCPeerConnection=${has('RTCPeerConnection')} ` +
+      `webkitRTCPeerConnection=${has('webkitRTCPeerConnection')} ` +
+      `MediaSource=${has('MediaSource')} ManagedMediaSource=${has('ManagedMediaSource')} ` +
+      `captureStream=${typeof document !== 'undefined' && 'captureStream' in document.createElement('video')}`,
+  );
+}
+
 /**
  * App-startup hook: enumerate devices and, if video was running at last close,
  * auto-start it with the persisted settings (device falls back to default if the
  * saved one is gone). Call once, client-side.
  */
 export async function initVideo(): Promise<void> {
-  if (mediaDevicesAvailable()) await enumerateVideoDevices();
-  if (boot.enabled) await startActive();
+  logWebViewMediaSupport();
+  // Skip getUserMedia enumeration at startup on Linux: it drives WebKit's GStreamer capture stack
+  // (pipewire), which hangs ~35 s and freezes launch on boxes with an unreachable pipewire (the
+  // symptom the native/MJPEG path was meant to avoid). Only the `camera` source needs this list, and
+  // it's enumerated lazily when the panel shows the camera dropdown. Windows/macOS enumerate fast.
+  if (mediaDevicesAvailable() && !isLinux) await enumerateVideoDevices();
+  if (!boot.enabled) return;
+
+  // Same stack, second entry point: on Linux the `camera` source's getUserMedia can stall the WebView
+  // process just like the enumeration did, and auto-starting it inline would do that *before the app
+  // has painted* — a blank window for half a minute. Skipping the enumeration alone didn't close that.
+  // Deferring past first paint can't prevent a stall inside WebKit, but it does mean the user gets a
+  // running, usable app either way. `native` and `rtsp` never touch that stack, so they start inline.
+  if (isLinux && get(videoState).kind === 'camera') {
+    setTimeout(() => void startActive(), LINUX_CAMERA_AUTOSTART_DELAY_MS);
+    return;
+  }
+  await startActive();
 }

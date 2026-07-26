@@ -10,13 +10,21 @@
 //!   2. `probe(id)`      — query a device's supported modes (codec + resolution range + fps range).
 //!   3. `input_args(spec)` / `needs_transcode()` — build the ffmpeg input for a chosen mode.
 //!
-//! The frontend intersects `probe()` output with a curated FPV catalog (see
-//! `helpers/videoCapabilities.ts`) so the picker stays short. Probe data is best-effort: V4L2's
-//! `-list_formats` has no framerate (fps reported as 0 = unknown → the UI offers curated defaults),
-//! and AVFoundation listings are too terse to parse reliably (probe returns empty → full catalog).
+//! The frontend renders `probe()` output as a Format → Resolution → Framerate cascade (see
+//! `helpers/videoCapabilities.ts`), showing every mode the device reports. Probe data is best-effort:
+//! on Linux `v4l2-ctl` supplies the exact discrete framerates (ffmpeg's `-list_formats` has none, so
+//! that fallback reports fps 0 = unknown), and AVFoundation listings are too terse to parse reliably
+//! (probe returns empty → the UI offers sensible defaults).
 
 use serde::Serialize;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+/// Hard cap on a device-enumeration / probe call. ffmpeg normally answers in well under a second;
+/// a wedged capture driver (DirectShow and AVFoundation both do this) can block **forever**, and this
+/// used to be an unbounded `Command::output()`. Bounded + killed, so a bad device costs one slow
+/// dropdown instead of a stuck helper process.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// A discovered native capture device. `id` is what ffmpeg addresses the device by on this OS:
 /// V4L2 = `/dev/videoN`, DirectShow = the friendly name, AVFoundation = the numeric index.
@@ -81,7 +89,7 @@ pub fn list_devices() -> Vec<NativeDevice> {
 }
 
 /// Probe a device's supported capture modes. Best-effort (see module docs); an empty result makes the
-/// frontend fall back to the full curated catalog with unknown-fps handling.
+/// frontend fall back to sensible defaults instead of an empty picker.
 pub fn probe(id: &str) -> Vec<CaptureMode> {
     #[cfg(target_os = "linux")]
     {
@@ -89,8 +97,17 @@ pub fn probe(id: &str) -> Vec<CaptureMode> {
     }
     #[cfg(target_os = "windows")]
     {
-        let arg = format!("video={id}");
-        run_ffmpeg_stderr(&["-hide_banner", "-f", "dshow", "-list_options", "true", "-i", &arg])
+        let (dev_name, dev_num) = dshow_split_id(id);
+        let arg = format!("video={dev_name}");
+        let num = dev_num.map(|n| n.to_string());
+        let mut args: Vec<&str> = vec!["-hide_banner", "-f", "dshow", "-list_options", "true"];
+        if let Some(n) = num.as_deref() {
+            args.push("-video_device_number");
+            args.push(n);
+        }
+        args.push("-i");
+        args.push(&arg);
+        run_ffmpeg_stderr(&args)
             .map(|s| parse_dshow_modes(&s))
             .unwrap_or_default()
     }
@@ -125,7 +142,13 @@ pub fn input_args(spec: &CaptureSpec) -> Vec<String> {
     }
     #[cfg(target_os = "windows")]
     {
+        let (dev_name, dev_num) = dshow_split_id(&spec.id);
         let mut a = vec!["-f".into(), "dshow".into()];
+        if let Some(n) = dev_num {
+            // Disambiguate identical friendly names (see `parse_dshow_devices`). Input option → before -i.
+            a.push("-video_device_number".into());
+            a.push(n.to_string());
+        }
         a.push("-framerate".into());
         a.push(fps);
         a.push("-video_size".into());
@@ -146,7 +169,7 @@ pub fn input_args(spec: &CaptureSpec) -> Vec<String> {
             }
         }
         a.push("-i".into());
-        a.push(format!("video={}", spec.id));
+        a.push(format!("video={dev_name}"));
         a
     }
     #[cfg(target_os = "macos")]
@@ -178,18 +201,51 @@ pub fn needs_transcode(codec: &str) -> bool {
 // ── ffmpeg invocation ─────────────────────────────────────────────────
 
 /// Run ffmpeg with the given args and return its **stderr** (ffmpeg prints device/format listings and
-/// diagnostics there). Returns None if ffmpeg isn't installed or couldn't be launched.
+/// diagnostics there). Returns None if ffmpeg isn't installed, couldn't be launched, or didn't finish
+/// within `QUERY_TIMEOUT` — in which case the child is killed rather than left behind.
+///
+/// The read happens on a helper thread so the wait can be bounded (`std::process` has no
+/// wait-with-timeout): stderr reaches EOF when ffmpeg exits, so a value on the channel means "done".
 fn run_ffmpeg_stderr(args: &[&str]) -> Option<String> {
     let bin = super::ffmpeg::find_ffmpeg()?;
     let mut cmd = Command::new(&bin);
-    cmd.args(args);
+    crate::child_env::sanitize(&mut cmd);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null()) // listings go to stderr; discard stdout so it can't fill a pipe
+        .stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW — don't flash a console
     }
-    let out = cmd.output().ok()?;
-    Some(String::from_utf8_lossy(&out.stderr).into_owned())
+    let mut child = cmd.spawn().ok()?;
+    let mut stderr = child.stderr.take()?;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+    });
+
+    match rx.recv_timeout(QUERY_TIMEOUT) {
+        Ok(text) => {
+            let _ = child.wait();
+            Some(text)
+        }
+        Err(_) => {
+            log::warn!(
+                "[video] ffmpeg device query timed out after {}s — killing it (args: {:?})",
+                QUERY_TIMEOUT.as_secs(),
+                args
+            );
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+    }
 }
 
 // ── Linux: rich probing via v4l2-ctl (real fps + colour-node filtering) ────────────────────────
@@ -391,9 +447,16 @@ fn between_single_quotes(s: &str) -> Option<&str> {
 // ── Parsers (pure; unit-tested cross-platform) ────────────────────────
 
 /// Parse `ffmpeg -f dshow -list_devices true` stderr into video devices (audio devices skipped).
+///
+/// DirectShow addresses a device by its friendly name, so two identical capture cards are literally
+/// indistinguishable — both listed as e.g. "USB Video", and `-i video=USB Video` always opens the
+/// first. ffmpeg's way out is `-video_device_number N` (0-based, "for devices with the same name"), so
+/// the 2nd, 3rd … occurrence gets its id tagged `<name>#N` (decoded again by `dshow_split_id`) and its
+/// label numbered, which also stops the dropdown from showing two identical rows.
 #[allow(dead_code)]
 fn parse_dshow_devices(stderr: &str) -> Vec<NativeDevice> {
-    let mut out = Vec::new();
+    let mut out: Vec<NativeDevice> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     let mut in_video = false;
     for line in stderr.lines() {
         if line.contains("DirectShow video devices") {
@@ -417,7 +480,16 @@ fn parse_dshow_devices(stderr: &str) -> Vec<NativeDevice> {
                 in_video
             };
             if is_video && !name.is_empty() {
-                out.push(NativeDevice { id: name.clone(), name });
+                let n = seen.iter().filter(|s| **s == name).count();
+                seen.push(name.clone());
+                if n == 0 {
+                    out.push(NativeDevice { id: name.clone(), name });
+                } else {
+                    out.push(NativeDevice {
+                        id: format!("{name}#{n}"),
+                        name: format!("{name} ({})", n + 1),
+                    });
+                }
             }
         }
     }
@@ -622,6 +694,23 @@ fn v4l2_input_format(codec: &str) -> String {
     }
 }
 
+/// Split a DirectShow device id back into `(friendly name, device number)` — the inverse of the
+/// duplicate tagging in `parse_dshow_devices`. Untagged ids (the common case, and every id persisted
+/// before the tagging existed) come back unchanged with no number.
+#[allow(dead_code)]
+fn dshow_split_id(id: &str) -> (String, Option<u32>) {
+    if let Some((base, idx)) = id.rsplit_once('#') {
+        // Only a non-empty base + a pure number is a tag; a device genuinely named "…#3" is unheard of,
+        // and the tag is only ever emitted for a repeated name in the first place.
+        if !base.is_empty() {
+            if let Ok(n) = idx.parse::<u32>() {
+                return (base.to_string(), Some(n));
+            }
+        }
+    }
+    (id.to_string(), None)
+}
+
 /// Map our normalized codec back to a DirectShow `-pixel_format` token.
 #[allow(dead_code)]
 fn dshow_pixfmt(codec: &str) -> String {
@@ -648,6 +737,29 @@ mod tests {
         assert_eq!(d.len(), 2);
         assert_eq!(d[0].name, "Integrated Camera");
         assert_eq!(d[1].id, "USB Video");
+    }
+
+    #[test]
+    fn dshow_duplicate_names_get_a_device_number() {
+        let s = "\
+[dshow @ 0x1] DirectShow video devices
+[dshow @ 0x1]  \"USB Video\"
+[dshow @ 0x1]  \"USB Video\"
+[dshow @ 0x1]  \"Integrated Camera\"";
+        let d = parse_dshow_devices(s);
+        assert_eq!(d.len(), 3);
+        // First keeps the bare name (so ids persisted before the tagging still resolve).
+        assert_eq!((d[0].id.as_str(), d[0].name.as_str()), ("USB Video", "USB Video"));
+        assert_eq!((d[1].id.as_str(), d[1].name.as_str()), ("USB Video#1", "USB Video (2)"));
+        assert_eq!(d[2].id, "Integrated Camera");
+    }
+
+    #[test]
+    fn dshow_id_split() {
+        assert_eq!(dshow_split_id("USB Video"), ("USB Video".to_string(), None));
+        assert_eq!(dshow_split_id("USB Video#1"), ("USB Video".to_string(), Some(1)));
+        // Not a tag: no number after the separator.
+        assert_eq!(dshow_split_id("Cam #A"), ("Cam #A".to_string(), None));
     }
 
     #[test]

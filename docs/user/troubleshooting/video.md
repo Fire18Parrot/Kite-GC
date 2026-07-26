@@ -26,6 +26,17 @@ you start an RTSP source. If a stream won't come up:
 - **Check the URL and reachability.** A typo, a camera that's off, a firewall, or a source on a different
   network will all stop it. Confirm the exact `rtsp://…` URL works in another player (e.g. VLC) from the
   same machine.
+- **Match the transport.** Some servers are **UDP-only** (they reject TCP clients) — set the connection's
+  **Transport** to **UDP** in the Video panel (needs the ffmpeg helper). Conversely, if UDP is blocked on
+  your network, try **TCP**. **Auto** tries the native reader first and falls back to ffmpeg.
+
+## The stream keeps showing "Reconnecting…"
+
+The overlay means Kite lost the feed and is retrying — it will **keep trying until the stream returns or
+you press Stop**. If it never comes back: the source is down or unreachable (check it in another player),
+the transport doesn't match the server (see above), or a firewall started blocking the media packets. A
+few reconnect cycles in a row are normal when a source restarts or the network path changes (e.g.
+switching between Wi-Fi and a cellular link).
 
 ## The picture stutters or shows "frames out of order"
 
@@ -54,6 +65,56 @@ optional download:
 With a sensibly-configured encoder, end-to-end latency is low (roughly a couple of hundred milliseconds).
 If it's much worse, the cause is usually the **source**: a large keyframe interval, a big encoder buffer,
 or a non-low-latency tuning. Tune the encoder/camera for low-latency streaming.
+
+## Linux: high CPU load or a stuttering picture
+
+On Linux, Kite depends on your distribution's browser-engine build for video — see the
+**[platform notes](../guides/video.md#platform-notes-what-to-expect-per-operating-system)** in the
+guide. The log tells you what your system offers. Restart Kite, start your stream, then open the log
+(**Settings → Diagnostics**, the default **Warning** level is enough) and look for:
+
+```
+[webkit]    WebKitGTK 2.xx.y — enable-webrtc set, reads back as true
+[gstreamer] webrtcbin=… · h264 decoders=[…]
+            WebRTC is unavailable in this WebView — falling back to the MJPEG image path
+```
+
+**If the last line is there, the direct playback path isn't available on this machine.** Kite then
+converts the stream frame by frame, which is what drives the CPU up and limits the resolution you can
+sustain. Two things are worth knowing:
+
+- **This is usually not something you can install your way out of.** Several Linux distributions —
+  Raspberry Pi OS among them — ship a browser engine built *without* the direct video path, and it then
+  stays unavailable no matter which media packages are present. On a Raspberry Pi 5 we measured the
+  engine reporting the feature as enabled, all the expected media plugins installed, and it still wasn't
+  there. If `webrtcbin=false` appears in your log it is still worth installing
+  `gstreamer1.0-plugins-bad` (and `gstreamer1.0-libav` if the decoder list is empty) — that is a genuine
+  prerequisite — but do not expect it to be sufficient.
+  Note that these package installs only affect the **system installation (.deb)**: the **AppImage**
+  brings its own browser engine and does not use the system's media packages at all. If video matters
+  to you on Linux, prefer the **.deb / system installation** — it uses your distribution's engine and
+  plugins, which you can at least influence.
+- **Hardware decoding is used automatically where it exists.** On boards whose chip can decode H.264
+  itself (Raspberry Pi 3 and 4 among them), Kite tests this once at startup and then lets the hardware
+  do the decoding half of the conversion. The log line `[ffmpeg] V4L2 hardware H.264 decoding: …` tells
+  you which way it went. A Raspberry Pi 5 has no such decoder — there everything is done on the CPU,
+  and no setting changes that.
+- **Send a smaller or slower stream from the source.** This is the one lever that really works, because
+  it removes the work at *every* stage — network, decoding, conversion and display. On a single-board
+  computer, 480p at 30 fps is comfortable where 720p60 is not. Set it where the stream is produced (your
+  video transmitter, camera or streaming server), not in Kite.
+- **Show the video in fewer places at once.** Every visible surface (panel preview, widget, floating
+  window) is drawn separately. Closing the ones you don't need frees noticeable load.
+
+Converting a 720p60 stream in software is simply beyond a small machine, and no setting inside Kite
+changes that arithmetic — the picture has to get smaller or slower at the source.
+
+## Raspberry Pi: garbled or black window right after start
+
+A known quirk of the Pi's graphics driver: the very first drawing surface is often invalid. Kite detects
+a Raspberry Pi and briefly resizes its own window once the interface has loaded, which forces a clean
+surface. If you still see it, the log line `[gpu] Raspberry Pi framebuffer nudge: …` tells you the
+workaround ran and which variant it used.
 
 ## Still stuck?
 
