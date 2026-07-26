@@ -238,4 +238,9 @@
     border-radius: calc(var(--ws) * 0.03);
     transition: width 0.5s ease;
   }
+  /* Low-power mode: no width smoothing — animating width reflows every frame, and the pack level
+     updates continuously in flight. The bar snaps to the current value instead. */
+  :global(html.kite-low-power) .bat-bar-fill {
+    transition: none;
+  }
 </style>

@@ -2247,6 +2247,9 @@
     border-radius: 50%;
     box-sizing: border-box;
     pointer-events: none;
+    /* Same reason as .gcs-live below: the pulse must ride on its own compositor layer, or each frame
+       repaints the full-screen map layer (and re-blurs everything backdrop-filtered above it). */
+    will-change: opacity, transform;
   }
   :global(.radar-alert-divicon .radar-alert-ring.caution) {
     border: 2px solid #f4c020;
@@ -2289,7 +2292,13 @@
     cursor: move;
     border-style: dashed;
   }
-  /* Continuous: a small green "live" dot, top-right. */
+  /* Continuous: a small green "live" dot, top-right.
+     `will-change: opacity` is load-bearing, not a micro-optimisation: without it this infinite pulse
+     has no compositor layer of its own, so every frame invalidates the enclosing map layer — which is
+     full-screen, and sits under several backdrop-filter surfaces that must then re-sample and re-blur.
+     An 8px dot cost ~25 % CPU here and ~70 % on a weak laptop, permanently, even with the marker
+     scrolled far outside the viewport (the invalidated rect still lives in that layer). Promoted, the
+     animation is a pure layer-alpha change: no repaint, no re-blur. */
   :global(.gcs-icon .gcs-dot .gcs-live) {
     position: absolute;
     top: -1px;
@@ -2300,7 +2309,14 @@
     background: #59aa29;
     border: 1px solid #fff;
     box-shadow: 0 0 4px #59aa29;
-    animation: gcs-live-pulse 1.4s ease-in-out infinite;
+    /* Quantised to 10 fps instead of running at display rate. `will-change` above removes the
+       repaint, but not the re-blur: a backdrop-filter surface has to re-sample whenever the
+       composited content beneath it changes — even for a pure layer-alpha change. So 60 alpha
+       changes a second still meant 60 re-blurs a second. `steps()` applies per keyframe interval,
+       and this pulse has two (0→50 %, 50→100 %) of 0.7 s each, so 7 steps per interval = 10 opacity
+       changes a second — a ~6× cut, invisible on a soft glow. */
+    animation: gcs-live-pulse 1.4s steps(7, end) infinite;
+    will-change: opacity;
   }
   @keyframes gcs-live-pulse {
     0%, 100% { opacity: 0.5; }

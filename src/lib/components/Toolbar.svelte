@@ -364,7 +364,11 @@
     border-radius: 50%;
     background: #ff3030;
     box-shadow: 0 0 6px rgba(255, 48, 48, 0.9);
-    animation: rc-active-pulse 1.1s ease-in-out infinite;
+    /* ~10 fps (steps() applies per keyframe interval: 2 × 0.55 s → 5 steps each) and its own
+       compositor layer — this runs for the whole RC session; at display rate every frame repaints the
+       toolbar and forces the blurred surfaces above it to re-sample. */
+    animation: rc-active-pulse 1.1s steps(5, end) infinite;
+    will-change: opacity;
   }
   @keyframes rc-active-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
