@@ -43,6 +43,19 @@ chmod +x KiteGC_Linux_*_standalone.AppImage
 ./KiteGC_Linux_*_standalone.AppImage
 ```
 
+!!! warning "Linux: your distribution needs to be reasonably current"
+    The Linux builds are compiled on Ubuntu 24.04 and need **glibc 2.39 or newer** — that is Ubuntu
+    24.04+, Debian 13 (Trixie), Raspberry Pi OS Trixie, Fedora 40+ or a current rolling release. On an
+    older system the app refuses to start with a message like
+    `version 'GLIBC_2.39' not found`; **Debian 12, Raspberry Pi OS Bookworm and Ubuntu 22.04 are below
+    the line.** This applies to every Linux download, the AppImage included — an AppImage bundles the
+    app's own libraries but never glibc, which always comes from your system.
+
+    We build on the newest base on purpose: the browser engine the AppImage carries comes from that
+    base too, and the older one had a fault that could leave a core spinning after a video stream was
+    stopped. If you need Kite on an older distribution, **[build it yourself](../for-developers/building.md)** —
+    compiled on your own system it will match it.
+
 ## Installed vs portable mode
 
 You can run Kite two ways:
