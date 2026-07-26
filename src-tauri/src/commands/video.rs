@@ -82,26 +82,30 @@ pub async fn video_webrtc_start(
     allow_hw_decode: Option<bool>,
     engine: State<'_, Go2Rtc>,
 ) -> Result<String, String> {
-    // Resolve the hardware probes FIRST and on a blocking thread: each runs two short ffmpeg
-    // processes, and `ensure_running` below writes the go2rtc config, which reads the same (cached)
-    // verdicts to emit the transcode templates — doing it in the other order would run those ffmpeg
-    // spawns on the async runtime's thread. Both probes are resolved in the same call for the same
-    // reason: `||` would short-circuit on a Pi (V4L2 available → VAAPI left unprobed), and the
-    // `hw_mjpeg_encode` read below would then trigger it off-thread.
+    // Resolve the hardware probes FIRST and on a blocking thread: each runs short ffmpeg processes,
+    // and `ensure_running` below writes the go2rtc config, which reads the same (cached) verdicts to
+    // emit the transcode templates — doing it in the other order would run those ffmpeg spawns on the
+    // async runtime's thread. They are resolved *here*, explicitly, rather than being left to a `||`
+    // in the expression below, because that would decide the order by accident.
     // V4L2 M2M is the Pi-class path (decode only); VAAPI is the desktop-GPU one and does the whole
     // chain — see `video::ffmpeg` for why a half-hardware chain is deliberately not an option.
     let (hw_v4l2, hw_vaapi) = tauri::async_runtime::spawn_blocking(|| {
-        (
-            crate::video::ffmpeg::v4l2_h264_decode_available(),
-            crate::video::ffmpeg::vaapi_render_node().is_some(),
-        )
+        let v4l2 = crate::video::ffmpeg::v4l2_h264_decode_available();
+        // Only ask about VAAPI when V4L2 had no answer, mirroring the go2rtc config writer's own
+        // `if/else if` — a board with a working SoC decoder never reaches the VAAPI template, so
+        // probing it there is two ffmpeg spawns for a verdict nothing reads. On a Raspberry Pi that
+        // is not merely wasted: `/dev/dri/renderD*` exists (the V3D render node) with no VAAPI driver
+        // behind it, so the probe runs against hardware that cannot answer.
+        let vaapi = !v4l2 && crate::video::ffmpeg::vaapi_render_node().is_some();
+        (v4l2, vaapi)
     })
     .await
     .unwrap_or((false, false));
     let port = engine.ensure_running()?;
     let hw = mjpeg && allow_hw_decode.unwrap_or(true) && (hw_v4l2 || hw_vaapi);
     // V4L2 M2M has no MJPEG encoder, so a Pi keeps go2rtc's software one; VAAPI does both halves.
-    let hw_mjpeg_encode = hw_vaapi && !hw_v4l2;
+    // The two are mutually exclusive by construction (see the probe order above).
+    let hw_mjpeg_encode = hw_vaapi;
     // `mjpeg` = the consumer will be go2rtc's `/api/stream.mjpeg` endpoint, which can only serve a
     // stream that actually carries an MJPEG track. An ordinary H.264 camera does not, so the source
     // must be registered with `#video=mjpeg` — an ffmpeg TRANSCODE, not a copy. Without it the endpoint

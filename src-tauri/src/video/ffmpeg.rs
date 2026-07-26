@@ -14,6 +14,8 @@ use std::process::Command;
 use std::process::Stdio;
 #[cfg(target_os = "linux")]
 use std::sync::OnceLock;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 
 const REPO: &str = "BtbN/FFmpeg-Builds";
 const RELEASES_PAGE: &str = "https://github.com/BtbN/FFmpeg-Builds/releases";
@@ -154,6 +156,55 @@ pub fn vaapi_render_node() -> Option<&'static str> {
     None
 }
 
+/// How long a single probe step may take before it is declared a failure and killed.
+///
+/// Generous on purpose — a cold static ffmpeg off an SD card needs a second or two just to start —
+/// but a hard ceiling, because the alternative is unbounded (see `run_probe`).
+#[cfg(target_os = "linux")]
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run one probe step to completion, or kill it at `PROBE_TIMEOUT` and call it a failure.
+///
+/// Load-bearing: `Command::status()` waits forever, and these probes drive kernel media devices.
+/// `h264_v4l2m2m` parks in `VIDIOC_DQBUF` when the decoder is busy or wedged — a documented Pi
+/// failure mode — and VAAPI on a render node without a matching driver can stall in the DRM ioctl.
+/// A single such stall used to park the `OnceLock` initialiser below *and*, because
+/// `get_or_init` blocks every concurrent caller, every later start attempt with it: the stream stayed
+/// in "starting" forever and no Stop could reach the ffmpeg behind it, because nothing owns these
+/// children once `status()` is waiting on them. Bounded, a bad device costs one slow first start and
+/// then reads as "software", which is exactly what it is.
+#[cfg(target_os = "linux")]
+fn run_probe(ff: &Path, args: &[&str]) -> bool {
+    let mut cmd = Command::new(ff);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::child_env::sanitize(&mut cmd);
+    let Ok(mut child) = cmd.spawn() else {
+        return false;
+    };
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Err(_) => return false,
+            Ok(None) => {}
+        }
+        if Instant::now() >= deadline {
+            log::warn!(
+                "[ffmpeg] hardware probe did not finish within {}s — killing it and treating this host \
+                 as software-only",
+                PROBE_TIMEOUT.as_secs()
+            );
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Try each `/dev/dri/renderD*` in turn (multi-GPU boxes number them 128, 129, …) and return the
 /// first that survives a real decode+encode round trip.
 #[cfg(target_os = "linux")]
@@ -180,15 +231,7 @@ fn probe_vaapi_render_node() -> Option<String> {
 fn probe_vaapi_transcode(ff: &Path, node: &str) -> bool {
     let clip = std::env::temp_dir().join("kite-vaapi-probe.h264");
     let clip_arg = clip.to_string_lossy().to_string();
-    let run = |args: &[&str]| -> bool {
-        let mut cmd = Command::new(ff);
-        cmd.args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        crate::child_env::sanitize(&mut cmd);
-        matches!(cmd.status(), Ok(s) if s.success())
-    };
+    let run = |args: &[&str]| -> bool { run_probe(ff, args) };
     let made = run(&[
         "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
         "testsrc=size=320x240:rate=10:duration=1", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-f",
@@ -213,15 +256,7 @@ fn probe_v4l2_h264_decode() -> bool {
     };
     let clip = std::env::temp_dir().join("kite-hwdecode-probe.h264");
     let clip_arg = clip.to_string_lossy().to_string();
-    let run = |args: &[&str]| -> bool {
-        let mut cmd = Command::new(&ff);
-        cmd.args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        crate::child_env::sanitize(&mut cmd);
-        matches!(cmd.status(), Ok(s) if s.success())
-    };
+    let run = |args: &[&str]| -> bool { run_probe(&ff, args) };
     let made = run(&[
         "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
         "testsrc=size=320x240:rate=10:duration=1", "-c:v", "libx264", "-f", "h264", &clip_arg,

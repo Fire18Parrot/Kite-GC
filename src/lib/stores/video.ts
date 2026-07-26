@@ -925,6 +925,16 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
         allowHwDecode: !get(videoState).disableHwAccel && rtspMjpegFailures < 2,
       });
       const mjpegUrl = await buildMjpegUrl();
+      // Stopped while we were away? The awaits above straddle a Stop easily — the backend's hardware
+      // probe alone can take seconds on a first start — and `stopVideo` has killed go2rtc by then,
+      // while `ensure_running` inside the call above quietly started it again. Publishing 'live' + a
+      // URL regardless put the <img> sinks back on screen, which reconnects a consumer and spawns the
+      // transcode: the feed kept running (and kept a small board's CPU pinned) after the user stopped
+      // it. Undo the restart and bail, exactly like the WebRTC path below.
+      if (get(videoState).kind !== 'rtsp' || !get(videoState).enabled) {
+        void invoke('video_webrtc_stop').catch(() => {});
+        return;
+      }
       // 'ffmpeg', always: an MJPEG source is registered as `ffmpeg:…#video=mjpeg` regardless of the
       // transport, because go2rtc's native reader cannot transcode. Reporting 'native' here told the
       // panel (and the tester) the opposite of what was running.
@@ -996,6 +1006,13 @@ export async function startNative(): Promise<void> {
   const sel = st.nativeSel;
   try {
     const { url, transcode } = await startNativeMjpeg(sel, id);
+    // Same straddled-Stop hazard as the RTSP path: the backend holds this call until the capture
+    // produces its first bytes, so a Stop in between runs its `stopNativeMjpeg` before this server
+    // even exists. Undo it rather than announcing a feed nobody asked for any more.
+    if (get(videoState).kind !== 'native' || !get(videoState).enabled) {
+      void stopNativeMjpeg();
+      return;
+    }
     patch({
       status: 'live',
       mjpegUrl: url,
