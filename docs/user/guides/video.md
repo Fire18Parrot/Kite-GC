@@ -18,6 +18,17 @@ is remembered between sessions.
   **transport**, and optionally **save the connection** to a list for one-click recall — see
   **[RTSP connections](#rtsp-connections-transport-and-auto-reconnect)** below.
 
+!!! info "Supported RTSP video codecs: H.264 and MJPEG"
+    Those two are what Kite officially supports and tests over RTSP today. **H.264** is the usual
+    choice and works everywhere. **MJPEG** costs more bandwidth but is passed through untouched — on
+    Linux that makes it the lightest option by a wide margin (see the
+    [platform notes](#platform-notes-what-to-expect-per-operating-system)).
+
+    Other codecs — **HEVC/H.265**, VP8, VP9, AV1 — are **not supported**. Some may happen to work on
+    some systems, but none is tested, and a stream Kite cannot play usually shows up as an endless
+    *"Reconnecting…"* rather than a clear error. If you need one of them, please open a request: the
+    limit is that we have no way to test it, not that it is impossible.
+
 ![The Video panel](../assets/guides/video/video_panel.png)
 /// caption
 The Video panel — source kind, device / RTSP URL, resolution, frame rate and mirror, with Start/Stop.

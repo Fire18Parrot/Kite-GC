@@ -30,6 +30,17 @@ you start an RTSP source. If a stream won't come up:
   **Transport** to **UDP** in the Video panel (needs the ffmpeg helper). Conversely, if UDP is blocked on
   your network, try **TCP**. **Auto** tries the native reader first and falls back to ffmpeg.
 
+## The stream keeps showing "Reconnecting…" — check the codec first
+
+Before chasing the network: **Kite supports H.264 and MJPEG over RTSP**, and nothing else. A stream
+in **HEVC/H.265**, VP8, VP9 or AV1 typically fails in exactly this way — it retries forever instead
+of reporting a codec problem, because from Kite's side an unplayable stream and an unreachable one
+look much alike.
+
+If another player shows your stream fine while Kite only reconnects, the codec is the first thing to
+check at the source. Switching it to **H.264** is the quickest test. (Codec support is limited by
+what we can test, not by what is possible — a request is welcome.)
+
 ## The stream keeps showing "Reconnecting…"
 
 The overlay means Kite lost the feed and is retrying — it will **keep trying until the stream returns or
