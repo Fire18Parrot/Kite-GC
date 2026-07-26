@@ -106,15 +106,19 @@
   .status-indicator.reconnecting {
     background: #f39c12;
     box-shadow: 0 0 4px rgba(243, 156, 18, 0.6);
-    /* 10 fps (steps() applies per keyframe interval: 2 × 0.5 s → 5 steps each), and its own
-       compositor layer. Otherwise this pulse repaints the status bar — and forces every blurred
-       surface over it to re-sample — at display rate for as long as a reconnect loop runs. */
-    animation: reconnect-pulse 1s steps(5, end) infinite;
-    will-change: opacity;
+    animation: reconnect-pulse 1s ease-in-out infinite;
   }
   @keyframes reconnect-pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.35; }
+  }
+  /* WebKitGTK → shared 1 Hz blink instead of a loop (see stores/pulseBlink.ts). */
+  :global(html.kite-blink-mode) .status-indicator.reconnecting {
+    animation: none;
+    opacity: 0.35;
+  }
+  :global(html.kite-blink-mode.kite-blink) .status-indicator.reconnecting {
+    opacity: 1;
   }
 
   .status-indicator.connected {

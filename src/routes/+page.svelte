@@ -85,6 +85,7 @@
   import FloatingVideoWindow from "$lib/components/video/FloatingVideoWindow.svelte";
   import { initVideo, videoState, videoStream, bindVideoEl, setMapLocation, setFloatHeightFrac, setFloatPos, registerPiPElement, reportMjpegError } from "$lib/stores/video";
   import { lowPowerActive } from "$lib/stores/lowPower";
+  import { initPulseBlink } from "$lib/stores/pulseBlink";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import TerrainAnalysisPanel from "$lib/components/terrain/TerrainAnalysisPanel.svelte";
   import { editMode, replayActive, mission, missionFlags, missionDownload, missionUpload, missionFcInfo, markMissionSynced, loadedMissionId, missionSetWaypoints, launchPoint, hasLocation, toDeg, type Waypoint } from "$lib/stores/mission";
@@ -2299,6 +2300,10 @@
   // class that CSS gates the expensive widget-bar transitions off (see stores/lowPower.ts). It is a
   // readable store, so it only runs while something subscribes — this is that subscription.
   onMount(() => lowPowerActive.subscribe(() => {}));
+
+  // Hard-blink indicator mode on WebKitGTK — see stores/pulseBlink.ts for why a looping CSS
+  // animation there costs ~46 % of a core regardless of size or visibility. No-op elsewhere.
+  onMount(() => initPulseBlink());
 
   // Startup update check (GitHub releases). Deferred a few seconds so it never competes with launch work;
   // failures are swallowed inside the controller — it must never disrupt the app.

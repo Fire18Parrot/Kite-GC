@@ -2269,6 +2269,17 @@
     0%, 100% { opacity: 0.55; transform: translate(-50%, -50%) scale(0.85); }
     50% { opacity: 1; transform: translate(-50%, -50%) scale(1.15); }
   }
+  /* WebKitGTK → shared 1 Hz blink instead of a loop (see stores/pulseBlink.ts). The rings
+     keep their scale pulse as a two-state change so the alert still reads as urgent. */
+  :global(html.kite-blink-mode .radar-alert-divicon .radar-alert-ring) {
+    animation: none;
+    opacity: 0.5;
+    transform: translate(-50%, -50%) scale(0.9);
+  }
+  :global(html.kite-blink-mode.kite-blink .radar-alert-divicon .radar-alert-ring) {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.1);
+  }
   @media (prefers-reduced-motion: reduce) {
     :global(.radar-alert-divicon .radar-alert-ring) { animation: none !important; }
   }
@@ -2309,18 +2320,21 @@
     background: #59aa29;
     border: 1px solid #fff;
     box-shadow: 0 0 4px #59aa29;
-    /* Quantised to 10 fps instead of running at display rate. `will-change` above removes the
-       repaint, but not the re-blur: a backdrop-filter surface has to re-sample whenever the
-       composited content beneath it changes — even for a pure layer-alpha change. So 60 alpha
-       changes a second still meant 60 re-blurs a second. `steps()` applies per keyframe interval,
-       and this pulse has two (0→50 %, 50→100 %) of 0.7 s each, so 7 steps per interval = 10 opacity
-       changes a second — a ~6× cut, invisible on a soft glow. */
-    animation: gcs-live-pulse 1.4s steps(7, end) infinite;
-    will-change: opacity;
+    animation: gcs-live-pulse 1.4s ease-in-out infinite;
   }
   @keyframes gcs-live-pulse {
     0%, 100% { opacity: 0.5; }
     50% { opacity: 1; }
+  }
+  /* WebKitGTK → shared 1 Hz blink instead of a loop. This dot is the element the whole
+     measurement was done on: ~46 % of a core, unchanged by `will-change`, by `steps()`, or by panning
+     it right out of the viewport. See stores/pulseBlink.ts. */
+  :global(html.kite-blink-mode .gcs-icon .gcs-dot .gcs-live) {
+    animation: none;
+    opacity: 0.5;
+  }
+  :global(html.kite-blink-mode.kite-blink .gcs-icon .gcs-dot .gcs-live) {
+    opacity: 1;
   }
   @media (prefers-reduced-motion: reduce) {
     :global(.gcs-icon .gcs-dot .gcs-live) { animation: none; }

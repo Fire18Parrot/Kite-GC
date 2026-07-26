@@ -17,3 +17,16 @@ export const isWindows = /Windows/i.test(ua);
 
 /** True on the Linux WebView (WebKitGTK; excludes Android) — drives the native-capture backend (V4L2). */
 export const isLinux = /Linux/i.test(ua) && !/Android/i.test(ua);
+
+/** True on WebKitGTK specifically — the Linux WebView, as opposed to macOS's WKWebView (a different
+ *  WebKit port on Core Animation) or Chromium-based WebView2.
+ *
+ *  Drives the hard-blink indicator mode. On WebKitGTK a looping CSS animation makes the compositor
+ *  rebuild the entire window every frame: the cost is per frame produced, not per pixel changed, so a
+ *  single 6-pixel dot measured ~46 % of a core. It is unaffected by the element's size, by
+ *  `will-change`, by `steps()` (which quantises the value, not the frame production), and even by
+ *  whether the element is on screen at all — a marker panned to the other side of the world costs
+ *  exactly the same. Only producing fewer frames helps: 5 Hz → 23 %, 2 Hz → 14 %, 1 Hz → 6 %.
+ *
+ *  Neither WebView2 nor macOS shows this, so both keep the smooth animations. */
+export const isWebKitGtk = isLinux;

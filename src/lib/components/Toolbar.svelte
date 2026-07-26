@@ -364,13 +364,19 @@
     border-radius: 50%;
     background: #ff3030;
     box-shadow: 0 0 6px rgba(255, 48, 48, 0.9);
-    /* ~10 fps (steps() applies per keyframe interval: 2 × 0.55 s → 5 steps each) and its own
-       compositor layer — this runs for the whole RC session; at display rate every frame repaints the
-       toolbar and forces the blurred surfaces above it to re-sample. */
-    animation: rc-active-pulse 1.1s steps(5, end) infinite;
-    will-change: opacity;
+    animation: rc-active-pulse 1.1s ease-in-out infinite;
   }
   @keyframes rc-active-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+  /* WebKitGTK: the loop is replaced by the shared 1 Hz blink. There, a looping
+     animation makes the compositor rebuild the entire window every frame — the cost is per frame
+     produced, not per pixel changed — so this dot measured ~46 % of a core. See stores/pulseBlink.ts. */
+  :global(html.kite-blink-mode) .rc-active-dot {
+    animation: none;
+    opacity: 0.25;
+  }
+  :global(html.kite-blink-mode.kite-blink) .rc-active-dot {
+    opacity: 1;
+  }
 
   .sensor {
     padding: 6px 12px;
