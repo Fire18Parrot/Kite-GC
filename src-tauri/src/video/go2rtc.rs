@@ -265,18 +265,29 @@ impl Go2Rtc {
         // JSON is valid YAML — go2rtc parses it. A real file (not inline) so its config-patch on
         // PUT /api/streams succeeds. Point go2rtc at our bundled ffmpeg so the `ffmpeg:` source
         // fallback works for quirky RTSP servers go2rtc's native client can't read.
-        // Point go2rtc at ffmpeg by its resolved path, or — if not installed yet — at the path the
-        // guided download WILL write to. go2rtc spawns ffmpeg per-source on demand, so a later
-        // download is picked up on the next stream start without restarting go2rtc.
-        let ffmpeg_bin = super::ffmpeg::find_ffmpeg()
-            .unwrap_or_else(|| dir.join(super::ffmpeg::binary_name()));
+        //
+        // BY NAME, never by path: go2rtc splits `ffmpeg.bin` on whitespace, so any path containing a
+        // space is truncated at the first one — `C:\Program Files\ffmpeg\ffmpeg.exe` becomes
+        // `C:\Program`, and every `ffmpeg:` source dies with `executable file not found in %PATH%`.
+        // Quoting does not help; go2rtc hands the quotes through to exec verbatim (both measured).
+        // That made H.264 unplayable in every installed Windows build, because the default install
+        // path *is* `…\Programs\Kite Ground Control\…`, while a dev run — whose ffmpeg sits under
+        // `AppData\Roaming\kite-gc\bin`, no spaces — worked. The directory instead goes on the child's
+        // PATH below, where separators are `;`/`:` and spaces are unremarkable.
+        //
+        // Kept resolved-or-future: if ffmpeg isn't installed yet, the download target's directory is
+        // on the PATH anyway, and go2rtc spawns ffmpeg per source on demand — so a later download is
+        // picked up on the next stream start without restarting go2rtc.
+        let ffmpeg_dir = super::ffmpeg::find_ffmpeg()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| dir.clone());
         // Hardware transcode templates. They live HERE, as named `ffmpeg:` entries, rather than being
         // spelled out in the source string, because go2rtc rejects any source containing a space
         // ("source with spaces may be insecure" → HTTP 400 on PUT /api/streams). A named template is
         // referenced as `#input=NAME` / `#video=NAME`, so the source stays space-free while the
         // expansion carries as many arguments as it likes. See `commands::video::video_webrtc_start`.
         let mut ffmpeg_cfg = serde_json::Map::new();
-        ffmpeg_cfg.insert("bin".into(), ffmpeg_bin.to_string_lossy().into());
+        ffmpeg_cfg.insert("bin".into(), super::ffmpeg::binary_name().into());
         // Pi-class SoCs: hardware H.264 decode only (there is no V4L2 M2M MJPEG encoder), mirroring
         // go2rtc's own `rtsp/udp` input template so a stream that reads on one reads on the other.
         if super::ffmpeg::v4l2_h264_decode_available() {
@@ -324,6 +335,20 @@ impl Go2Rtc {
         cmd.arg("-config").arg(&cfg_path);
         // go2rtc spawns ffmpeg itself, so a poisoned environment here breaks the readers too.
         crate::child_env::sanitize(&mut cmd);
+        // This is how go2rtc finds the ffmpeg named in the config above — by name, because it cannot
+        // take a path with a space in it. Ours goes FIRST so a copy we manage wins over any other the
+        // system happens to carry, and because PATH is separated by `;`/`:`, the spaces that broke the
+        // `bin` setting are irrelevant here.
+        let mut search: Vec<std::path::PathBuf> = vec![ffmpeg_dir];
+        if let Some(existing) = std::env::var_os("PATH") {
+            search.extend(std::env::split_paths(&existing));
+        }
+        match std::env::join_paths(&search) {
+            Ok(joined) => {
+                cmd.env("PATH", joined);
+            }
+            Err(e) => log::warn!("[video] cannot extend go2rtc's PATH ({e}) — ffmpeg sources may fail"),
+        }
         cmd.stdout(Stdio::null()).stderr(Stdio::piped()).stdin(Stdio::null());
         #[cfg(windows)]
         {
