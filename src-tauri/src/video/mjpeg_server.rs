@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 
-//! Embedded MJPEG-over-HTTP server for native capture devices (V4L2 / DirectShow / AVFoundation).
+//! Embedded MJPEG-over-HTTP server. Serves two kinds of source:
 //!
-//! Spawns `ffmpeg -f <demuxer> … -f mpjpeg -` and **broadcasts** its stdout to every connected HTTP
-//! client as a `multipart/x-mixed-replace` stream on a local port. Multiple sinks (panel preview,
-//! floating window, dock widget) each open their own `<img>` on the same URL — one ffmpeg
-//! decode/transcode fans out to all of them. The per-OS input + codec handling lives in
-//! `video/native.rs`.
+//! * **native capture devices** (V4L2 / DirectShow / AVFoundation) — the per-OS input + codec
+//!   handling lives in `video/native.rs`.
+//! * **RTSP streams whose picture reaches the screen as MJPEG** — either because the source already
+//!   sends MJPEG, or because this WebView has no WebRTC and the H.264 has to be transcoded.
+//!
+//! Spawns `ffmpeg … -f mpjpeg -` and **broadcasts** its stdout to every connected HTTP client as a
+//! `multipart/x-mixed-replace` stream on a local port. One ffmpeg decode/transcode fans out to all
+//! sinks (panel preview, floating window, dock widget, full-screen swap).
 //!
 //! Sockets get `TCP_NODELAY` and ffmpeg flushes per packet, so localhost delivery isn't bunched by
 //! Nagle/output buffering (which shows up as sporadic stutter, worse at 60 fps).
@@ -40,6 +43,46 @@ const HTTP_HEADERS: &[u8] = b"HTTP/1.1 200 OK\r\n\
     Connection: close\r\n\
     \r\n";
 
+/// What the server captures from.
+pub enum MjpegSource<'a> {
+    /// A local capture device, described by the mode the user picked.
+    Device(&'a super::native::CaptureSpec),
+    /// A network stream, read directly rather than through go2rtc.
+    ///
+    /// go2rtc drives an `ffmpeg:` source by having ffmpeg publish **back into go2rtc** over RTSP/TCP,
+    /// so a stream that is already MJPEG gets packetised into RTP/JPEG (RFC 2435), reassembled and
+    /// repacked as HTTP multipart. Measured over the same 120 s against a UAV-Link: the source had
+    /// **zero** arrival gaps above 200 ms, go2rtc's output had **69**, each of them ~338 ms — a fixed
+    /// buffer flushing, and the cause of the freezes testers reported for years. Reading the source
+    /// once and broadcasting `-f mpjpeg` measures as clean as the source itself.
+    Rtsp { url: &'a str, transcode: RtspTranscode },
+}
+
+/// How an RTSP source's video becomes the MJPEG the multipart sink needs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RtspTranscode {
+    /// The source already sends MJPEG — pass its packets through untouched. No decode, no encode.
+    Copy,
+    /// Pi-class SoC: hardware H.264 decode, software MJPEG encode (no V4L2 M2M MJPEG encoder exists).
+    V4l2m2m,
+    /// Desktop GPU: both halves on the GPU, the frames never leaving it. Carries the render node.
+    Vaapi(&'static str),
+    Software,
+}
+
+impl RtspTranscode {
+    /// The label the UI shows for the running pipeline — the pipeline that IS running, not what the
+    /// host could do.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::V4l2m2m => "v4l2m2m",
+            Self::Vaapi(_) => "vaapi",
+            Self::Software => "software",
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct MjpegServer {
     inner: Mutex<Option<Running>>,
@@ -58,14 +101,14 @@ impl MjpegServer {
         Self::default()
     }
 
-    /// Start the MJPEG server. Spawns ffmpeg to capture from a native device per `spec` and output
-    /// MJPEG (stream-copied when the input is already MJPEG, transcoded otherwise), then broadcasts its
-    /// stdout to all connected HTTP clients.
+    /// Start the MJPEG server. Spawns ffmpeg to read `source` and output MJPEG (stream-copied where
+    /// the input already carries it, transcoded otherwise), then broadcasts its stdout to all
+    /// connected HTTP clients.
     ///
-    /// Returns the port **only once the capture has actually delivered its first bytes** (up to
+    /// Returns the port **only once the source has actually delivered its first bytes** (up to
     /// `FIRST_FRAME_TIMEOUT`); otherwise everything is torn down again and the error carries ffmpeg's
     /// own first stderr line. Blocking by design — call it from an async command.
-    pub fn start(&self, spec: &super::native::CaptureSpec) -> Result<u16, String> {
+    pub fn start(&self, source: &MjpegSource) -> Result<u16, String> {
         self.stop();
 
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind: {e}"))?;
@@ -79,24 +122,76 @@ impl MjpegServer {
         let ffmpeg_bin = super::ffmpeg::find_ffmpeg()
             .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
 
-        // Build: [loglevel] + per-OS input (native) + output codec + mpjpeg mux (flushing per packet).
-        // `-fflags nobuffer` (an input option, so it precedes the demuxer/-i) cuts input-side buffering
-        // for lower latency and tighter pacing on live capture.
-        let mut args: Vec<String> = vec![
-            "-loglevel".into(),
-            "error".into(),
-            "-fflags".into(),
-            "nobuffer".into(),
-        ];
-        args.extend(super::native::input_args(spec));
-        if super::native::needs_transcode(&spec.codec) {
-            // Raw / H.264 / auto → re-encode to MJPEG for the multipart sink.
-            args.extend(["-c:v".into(), "mjpeg".into(), "-q:v".into(), "5".into()]);
-        } else {
-            // The camera already emits MJPEG: pass the packets straight through. No decode, no
-            // encode, no colour conversion — cheaper than any hardware transcode could ever be, so
-            // there is deliberately nothing to accelerate here.
-            args.extend(["-c".into(), "copy".into()]);
+        // Build: [loglevel] + input (device or network) + output codec + mpjpeg mux (flushing per
+        // packet). `-fflags nobuffer` and the hardware decoder selection are INPUT options, so they
+        // precede the demuxer / `-i`.
+        let mut args: Vec<String> = vec!["-loglevel".into(), "error".into()];
+        match source {
+            MjpegSource::Device(spec) => {
+                args.extend(["-fflags".into(), "nobuffer".into()]);
+                args.extend(super::native::input_args(spec));
+                if super::native::needs_transcode(&spec.codec) {
+                    // Raw / H.264 / auto → re-encode to MJPEG for the multipart sink.
+                    args.extend(["-c:v".into(), "mjpeg".into(), "-q:v".into(), "5".into()]);
+                } else {
+                    // The camera already emits MJPEG: pass the packets straight through. No decode, no
+                    // encode, no colour conversion — cheaper than any hardware transcode could ever be,
+                    // so there is deliberately nothing to accelerate here.
+                    args.extend(["-c".into(), "copy".into()]);
+                }
+            }
+            MjpegSource::Rtsp { url, transcode } => {
+                match transcode {
+                    RtspTranscode::V4l2m2m => args.extend(["-c:v".into(), "h264_v4l2m2m".into()]),
+                    RtspTranscode::Vaapi(node) => args.extend([
+                        "-hwaccel".into(),
+                        "vaapi".into(),
+                        "-hwaccel_device".into(),
+                        (*node).into(),
+                        // Load-bearing: keeps decoded frames in GPU memory for the encoder below.
+                        // Without it every frame is copied back to system memory and the chain ends
+                        // up SLOWER than software.
+                        "-hwaccel_output_format".into(),
+                        "vaapi".into(),
+                    ]),
+                    RtspTranscode::Copy | RtspTranscode::Software => {}
+                }
+                // Deliberately NO `-rtsp_transport`: forcing one is what stops a UDP-only server
+                // (the UAV-Link class) from opening at all, while ffmpeg's own negotiation reads
+                // both. `-timeout` is in microseconds and makes a dead source exit rather than hang,
+                // which is what lets the frontend notice and reconnect.
+                //
+                // 10 s to match the WebRTC path's live-stall window (`RTSP_STALL_LIVE_MS`), so both
+                // readers tolerate the same LTE radio hole. go2rtc used 5 s here; UDP fires blind, so
+                // the longer window is the better trade — and a stream abandoned mid-flight is
+                // reaped server-side after 60 s anyway, which bounds how many can pile up.
+                args.extend([
+                    "-fflags".into(),
+                    "nobuffer".into(),
+                    "-flags".into(),
+                    "low_delay".into(),
+                    "-timeout".into(),
+                    "10000000".into(),
+                    "-i".into(),
+                    (*url).into(),
+                    "-an".into(),
+                ]);
+                match transcode {
+                    RtspTranscode::Copy => args.extend(["-c".into(), "copy".into()]),
+                    // `-async_depth 1`: the VAAPI encoders pipeline 2 frames by default for
+                    // throughput, which on a live feed is simply latency — we want the frame out,
+                    // not the frame rate.
+                    RtspTranscode::Vaapi(_) => args.extend([
+                        "-c:v".into(),
+                        "mjpeg_vaapi".into(),
+                        "-async_depth".into(),
+                        "1".into(),
+                    ]),
+                    RtspTranscode::V4l2m2m | RtspTranscode::Software => {
+                        args.extend(["-c:v".into(), "mjpeg".into(), "-q:v".into(), "5".into()])
+                    }
+                }
+            }
         }
         // Emit each packet immediately (no output buffering) → even, low-jitter frame delivery.
         args.extend(["-flush_packets".into(), "1".into(), "-f".into(), "mpjpeg".into(), "-".into()]);
@@ -155,7 +250,11 @@ impl MjpegServer {
                 Some(line) => format!("{reason}: {line}"),
                 None => reason,
             };
-            log::warn!("[video] native capture failed to start — {msg}");
+            let what = match source {
+                MjpegSource::Device(_) => "native capture",
+                MjpegSource::Rtsp { .. } => "the RTSP MJPEG reader",
+            };
+            log::warn!("[video] {what} failed to start — {msg}");
             return Err(msg);
         }
 
@@ -207,7 +306,7 @@ fn wait_for_first_frame(child: &mut Child, rx: &Receiver<()>) -> Result<(), Stri
                 }
                 if Instant::now() >= deadline {
                     return Err(format!(
-                        "no video from the capture device within {} s",
+                        "no video from the source within {} s",
                         FIRST_FRAME_TIMEOUT.as_secs()
                     ));
                 }
@@ -241,8 +340,10 @@ fn accept_loop(listener: TcpListener, clients: Arc<Mutex<Vec<TcpStream>>>, shutd
 }
 
 /// Read ffmpeg's stdout and write each chunk to every connected client, dropping clients that error
-/// (disconnected `<img>`). Always drains stdout even with no clients so ffmpeg never blocks on a full
-/// pipe. Exits on EOF (ffmpeg died) or shutdown.
+/// (a disconnected sink). Always drains stdout even with no clients so ffmpeg never blocks on a full
+/// pipe. Exits on EOF (ffmpeg died) or shutdown, and **closes every client on the way out**: a
+/// consumer whose socket stays open with no data has no way to tell a dead feed from a quiet one, so
+/// leaving them connected left a permanently frozen picture instead of triggering a reconnect.
 fn broadcast_loop(
     mut stdout: impl Read,
     clients: Arc<Mutex<Vec<TcpStream>>>,
@@ -259,14 +360,14 @@ fn broadcast_loop(
                 // stdout EOF = ffmpeg exited. If we didn't ask it to stop, that's the "goes black"
                 // failure — surface it (the stderr logger prints ffmpeg's reason just above).
                 if !shutdown.load(Ordering::SeqCst) {
-                    log::warn!("[video] native MJPEG source ended unexpectedly (ffmpeg exited)");
+                    log::warn!("[video] MJPEG source ended unexpectedly (ffmpeg exited)");
                 }
                 break;
             }
             Ok(n) => n,
             Err(e) => {
                 if !shutdown.load(Ordering::SeqCst) {
-                    log::warn!("[video] native MJPEG read error: {e}");
+                    log::warn!("[video] MJPEG read error: {e}");
                 }
                 break;
             }
@@ -282,6 +383,10 @@ fn broadcast_loop(
         }
         list.retain_mut(|c| c.write_all(&buf[..n]).is_ok());
     }
+    // The source is gone. Stop accepting, and drop every client socket so the sinks see their stream
+    // end and the frontend can reconnect instead of staring at a frozen frame.
+    shutdown.store(true, Ordering::SeqCst);
+    clients.lock().unwrap().clear();
 }
 
 /// Forward ffmpeg's stderr to the log. With `-loglevel error` these are genuine errors (device lost,

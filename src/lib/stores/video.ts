@@ -338,6 +338,10 @@ export interface VideoRtcStats {
   jitterMs: number | null;
   /** Average jitter-buffer (playout) delay per emitted frame in ms, if reported. */
   playoutDelayMs: number | null;
+  /** Received bitrate over the last poll interval, in kbit/s. */
+  kbps: number;
+  /** The negotiated video codec, prettified from the codec report's mime type (e.g. `H.264`). */
+  codec: string | null;
 }
 export const videoRtcStats = writable<VideoRtcStats | null>(null);
 
@@ -400,13 +404,6 @@ function mediaDevicesAvailable(): boolean {
 /** Check if RTCPeerConnection is available (WebRTC support in the WebView). */
 export function isWebrtcAvailable(): boolean {
   return typeof RTCPeerConnection !== 'undefined';
-}
-
-/** Build the go2rtc MJPEG URL from the running engine's API port. */
-async function buildMjpegUrl(): Promise<string> {
-  const port = await invoke<number | null>('video_go2rtc_port');
-  if (!port) throw new Error('go2rtc not running');
-  return `http://127.0.0.1:${port}/api/stream.mjpeg?src=kite`;
 }
 
 /** Start a native device via the built-in ffmpeg→MJPEG server (no getUserMedia, no go2rtc). The chosen
@@ -624,19 +621,23 @@ export async function startVideo(): Promise<void> {
   }
 }
 
-/** Bring the feed up on the MJPEG image path: register the source, point the `<img>` sinks at
- *  go2rtc's multipart endpoint. Returns false if it could not be started — the caller decides whether
- *  that means a reconnect or a fall-through.
+/** Bring the feed up on the MJPEG image path: one ffmpeg reads the source and its `-f mpjpeg` output
+ *  is broadcast by our own HTTP server, which the sinks read. Returns false if it could not be
+ *  started — the caller decides whether that means a reconnect or a fall-through.
  *
  *  Used from two places, and the second is not a fallback for a broken WebView: an MJPEG source
  *  cannot be carried over WebRTC by any browser, so it needs this path even where WebRTC works.
  *  `requireCopy` is what makes that safe to try blindly — see the call site.
  *
- *  Cheaper than its reputation now: the backend stream-copies a source that already sends MJPEG, so
- *  for one of those this costs a JPEG decode and no transcode at all. */
-async function startMjpegPath(url: string, transport: string, requireCopy = false): Promise<boolean> {
-  // An H.264 source has to be transcoded to gain an MJPEG track, and that needs ffmpeg. Missing
-  // ffmpeg makes the endpoint fail instantly — a dead end no reconnect fixes.
+ *  **Deliberately not through go2rtc.** go2rtc drives an `ffmpeg:` source by having ffmpeg publish
+ *  back into it over RTSP/TCP, which for an already-MJPEG stream means packetising into RTP/JPEG,
+ *  reassembling and repacking. Measured over the same 120 s: zero arrival gaps above 200 ms at the
+ *  source, 69 of them (each ~338 ms) at go2rtc's output. That was the freeze. The transport choice is
+ *  irrelevant here for the same reason it was before — ffmpeg negotiates it and reads UDP-only
+ *  servers, which is why nothing forces `-rtsp_transport`. */
+async function startMjpegPath(url: string, requireCopy = false): Promise<boolean> {
+  // The image path is ffmpeg's alone now, for the copy as much as for the transcode. Missing ffmpeg
+  // is a dead end no reconnect fixes.
   const ffmpeg = await invoke<string | null>('video_ffmpeg_status').catch(() => null);
   if (!ffmpeg) {
     logVideo('warn', 'MJPEG path needs ffmpeg and it is not installed');
@@ -650,29 +651,23 @@ async function startMjpegPath(url: string, transport: string, requireCopy = fals
     // has actually been delivering. Two failures in a row and we ask for the software decoder, so a
     // host that passes the backend's probe yet cannot hold a live stream on the hardware path still
     // ends up with a picture instead of an endless reconnect loop.
-    const transcode = await invoke<string>('video_webrtc_start', {
+    const res = await invoke<{ url: string; transcode: string }>('video_rtsp_mjpeg_start', {
       url,
-      useFfmpeg: transport === 'udp',
-      mjpeg: true,
+      requireCopy,
       // Two vetoes, either of which forces the software transcode: the user's explicit setting, and
       // the automatic one after repeated failures.
       allowHwDecode: !get(videoState).disableHwAccel && rtspMjpegFailures < 2,
     });
-    if (requireCopy && transcode !== 'copy') return false;
-    const mjpegUrl = await buildMjpegUrl();
     // Stopped while we were away? The awaits above straddle a Stop easily — the backend's hardware
-    // probe alone can take seconds on a first start — and `stopVideo` has killed go2rtc by then, while
-    // `ensure_running` inside the call above quietly started it again. Publishing 'live' + a URL
-    // regardless put the <img> sinks back on screen, which reconnects a consumer and spawns the
-    // transcode: the feed kept running (and kept a small board's CPU pinned) after the user stopped it.
+    // probe alone can take seconds on a first start. Publishing 'live' + a URL regardless put the
+    // sinks back on screen, which reconnects a consumer and keeps a small board's CPU pinned after
+    // the user stopped it.
     if (get(videoState).kind !== 'rtsp' || !get(videoState).enabled) {
-      void invoke('video_webrtc_stop').catch(() => {});
+      void stopNativeMjpeg();
       return true; // not a failure — the user stopped it
     }
-    // 'ffmpeg', always: this path is registered as an `ffmpeg:` source regardless of the transport,
-    // because go2rtc's native reader cannot transcode and fails UDP-only servers at SETUP anyway.
-    // Reporting 'native' here told the panel (and the tester) the opposite of what was running.
-    patch({ status: 'live', mjpegUrl, activeTranscode: transcode, error: null, rtspEngine: 'ffmpeg', reconnecting: false, reconnectAttempt: 0 });
+    // 'ffmpeg', always: this path IS an ffmpeg reader, whatever the transport setting says.
+    patch({ status: 'live', mjpegUrl: res.url, activeTranscode: res.transcode, error: null, rtspEngine: 'ffmpeg', reconnecting: false, reconnectAttempt: 0 });
     return true;
   } catch (e) {
     logVideo('warn', `RTSP (MJPEG path) failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -731,6 +726,13 @@ let rtspReconnectTimer: ReturnType<typeof setTimeout> | undefined;
  *  give up on the hardware decoder rather than loop forever on a host it doesn't work on. */
 let rtspMjpegFailures = 0;
 
+/** `video/H264` → `H.264`. The RTP mime type is the only place the negotiated codec is named, and it
+ *  spells the common ones without the dot everyone reads them with. */
+function prettyCodec(mimeType: string): string {
+  const name = (mimeType.split('/')[1] ?? mimeType).toUpperCase();
+  return { H264: 'H.264', H265: 'H.265', HEVC: 'H.265' }[name] ?? name;
+}
+
 function clearRtspTimers(): void {
   if (rtspMonitor) { clearInterval(rtspMonitor); rtspMonitor = undefined; }
   if (rtspReconnectTimer) { clearTimeout(rtspReconnectTimer); rtspReconnectTimer = undefined; }
@@ -747,6 +749,7 @@ function startRtspStallMonitor(pc: RTCPeerConnection): void {
   let warnedNoReport = false;
   let prevFrames = -1;
   let prevDecoded = 0;
+  let prevBytes = 0;
   let prevAt = performance.now();
   let statTick = 0;
   videoRtcStats.set(null);
@@ -764,6 +767,7 @@ function startRtspStallMonitor(pc: RTCPeerConnection): void {
       let freezeMs: number | null = null;
       let jitterMs: number | null = null;
       let playoutMs: number | null = null;
+      let codecId: string | undefined;
       let sawReport = false;
       stats.forEach((report) => {
         if (report.type !== 'inbound-rtp') return;
@@ -799,7 +803,12 @@ function startRtspStallMonitor(pc: RTCPeerConnection): void {
         if (rr.jitterBufferDelay !== undefined && rr.jitterBufferEmittedCount) {
           playoutMs = (rr.jitterBufferDelay / rr.jitterBufferEmittedCount) * 1000;
         }
+        if (rr.codecId) codecId = rr.codecId;
       });
+      // The codec lives in its own report, referenced by the inbound one.
+      const codecMime = codecId
+        ? (stats.get(codecId) as (RTCStats & { mimeType?: string }) | undefined)?.mimeType
+        : undefined;
       if (!sawReport) {
         // No inbound stats at all — we cannot measure, so we must not judge. Say so once.
         if (!warnedNoReport) {
@@ -824,11 +833,14 @@ function startRtspStallMonitor(pc: RTCPeerConnection): void {
             freezeMs,
             jitterMs,
             playoutDelayMs: playoutMs,
+            kbps: Math.max(0, ((bytes - prevBytes) * 8) / 1000 / dt),
+            codec: codecMime ? prettyCodec(codecMime) : null,
           });
         }
       }
       prevFrames = frames;
       prevDecoded = decoded;
+      prevBytes = bytes;
       prevAt = now;
       // A periodic trace of the same numbers, so a tester's Debug-level log shows where a jittery
       // picture loses its frames (receive vs decode vs playout) without the Debug Monitor.
@@ -876,6 +888,9 @@ function scheduleRtspReconnect(): void {
   }
   clearRtspTimers();
   closeRtc();
+  // Release the image path too. Its ffmpeg holds the source open, and a WebRTC-capable host retries
+  // WebRTC on every cycle — without this, each attempt stacked a second reader on the same stream.
+  void stopNativeMjpeg();
   videoStream.set(null);
   patch({
     reconnecting: true,
@@ -934,6 +949,20 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
     rtspMjpegFailures = 0; // a deliberate (re)start gets the hardware decoder another chance
   }
 
+  // MJPEG fallback for webviews without RTCPeerConnection (rare in Tauri). Decided BEFORE the engine
+  // gate below: the image path is ffmpeg's alone now and never touches go2rtc, so demanding the
+  // engine here would block a machine that already has everything this path needs.
+  if (!isWebrtcAvailable()) {
+    // Degraded mode, and a silent one: it needs a WebView that renders the image path, and for an
+    // H.264 source a transcode as well. Worth a warning every time, not just a console line.
+    if (!reconnect) {
+      logVideo('warn', 'WebRTC is unavailable in this WebView — falling back to the MJPEG image path');
+      logVideo('info', `RTSP start ${url} (transport=${transport}, webrtc=false, go2rtc not used)`);
+    }
+    if (!(await startMjpegPath(url))) scheduleRtspReconnect();
+    return;
+  }
+
   if (!reconnect) {
     // A missing engine cannot be fixed by retrying, so it must not enter the loop: before this, an
     // auto-start without go2rtc installed produced an endless "Reconnecting… (n)" with no explanation
@@ -944,21 +973,7 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
       patch({ status: 'error', error: get(t)('video.engineMissing'), reconnecting: false, reconnectAttempt: 0 });
       return;
     }
-    logVideo(
-      'info',
-      `RTSP start ${url} (transport=${transport}, webrtc=${isWebrtcAvailable()}, engine=${engine})`,
-    );
-  }
-
-  // MJPEG fallback for webviews without RTCPeerConnection (rare in Tauri).
-  if (!isWebrtcAvailable()) {
-    // Degraded mode, and a silent one: it needs a WebView that renders multipart images, and for an
-    // H.264 source a go2rtc transcode as well. Worth a warning every time, not just a console line.
-    if (!reconnect) {
-      logVideo('warn', 'WebRTC is unavailable in this WebView — falling back to the MJPEG image path');
-    }
-    if (!(await startMjpegPath(url, transport))) scheduleRtspReconnect();
-    return;
+    logVideo('info', `RTSP start ${url} (transport=${transport}, webrtc=true, engine=${engine})`);
   }
 
   try {
@@ -982,7 +997,7 @@ export async function startRtsp(opts?: { reconnect?: boolean }): Promise<void> {
     // the backend reports an actual stream copy, i.e. the source really was MJPEG. Anything else means
     // the source was H.264 and WebRTC failed for some other reason (server down, transport), where
     // silently settling for a transcode would be a permanent downgrade — so that keeps reconnecting.
-    if (await startMjpegPath(url, transport, true)) {
+    if (await startMjpegPath(url, true)) {
       logVideo('warn', 'source is MJPEG, which WebRTC cannot carry — switched to the image path');
       return;
     }
