@@ -60,6 +60,32 @@ This is almost always the **source encoder**, not Kite. The live path uses WebRT
 
 This is a property of the stream Kite receives — it can't be fixed downstream for a pass-through feed.
 
+## The picture is smooth, then hitches — over and over, at a steady rhythm
+
+A stutter that returns **on a regular beat** — every ten seconds or so, a second or two of jerky
+picture, then smooth again — points at the **network link**, not at Kite and not at the encoder. A
+decoder that can't keep up drops frames evenly; it doesn't hand you a smooth picture for ten seconds
+and then a burst.
+
+The usual cause is **Wi-Fi**: a laptop periodically looks around for other access points, and while it
+does, traffic pauses for a tenth of a second or more. Either end of the link can do it — the machine
+running Kite, or the one sending the stream.
+
+You can check this without Kite at all. Leave the video running and, from a terminal, ping the source:
+
+```
+ping <address-of-your-video-source>
+```
+
+If the round-trip times jump from a few milliseconds to a hundred or more **in clusters that repeat on
+the same rhythm as the stutter**, the link is the cause — and no video setting will help. What does
+help:
+
+- **Use a cable** on either machine, which is the quickest way to confirm it.
+- Move closer to the access point, or onto a less crowded channel.
+- If the machine has to stay on Wi-Fi, turning off its power-saving mode for the wireless adapter is
+  worth a try.
+
 ## A specific RTSP server gives a black screen
 
 Some servers (notably the **OBS RTSP server**) reject go2rtc's native reader. Kite automatically retries
