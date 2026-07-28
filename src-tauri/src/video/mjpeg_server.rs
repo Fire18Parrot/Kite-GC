@@ -691,7 +691,11 @@ mod tests {
         assert_eq!(frame_len(b"--ffmpeg\r\nContent-type: image/jpeg\r\n\r\nAAAA"), None);
     }
 
-    /// A source that produces 30 KB parts at 60 fps, standing in for ffmpeg's stdout.
+    /// A source that paces 16 KB parts at roughly 60 fps, standing in for ffmpeg's stdout.
+    ///
+    /// "Roughly" is deliberate: `thread::sleep` rounds up to the scheduler's tick, which on Windows
+    /// is ~15.6 ms, so the same loop runs at half the rate there. Nothing in the test may depend on
+    /// how long it takes — the sinks read until the stream ends, not until a clock runs out.
     struct FakeCapture {
         buf: Vec<u8>,
         next: Instant,
@@ -735,29 +739,41 @@ mod tests {
             thread::spawn(move || accept_loop(listener, c, s))
         };
 
-        // A sink that reads roughly one frame every 25 ms — the pace a WebKit JPEG decode manages.
-        let slow = thread::spawn(move || {
-            let mut sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
-            sock.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
-            let mut sink = [0u8; 4096];
-            let deadline = Instant::now() + Duration::from_secs(3);
-            while Instant::now() < deadline {
-                if sock.read(&mut sink).unwrap_or(0) == 0 {
-                    break;
+        // Both sinks read until the broadcast closes their socket, which it does when the source
+        // ends. Nothing here waits on a clock: a wall-clock deadline made this fail on Windows for
+        // the scheduler's timer granularity rather than for anything the server did. The long guards
+        // below only stop a hang.
+        let guard = || Instant::now() + Duration::from_secs(60);
+
+        // A sink that reads a little and then sleeps — the pace a WebKit JPEG decode manages. It
+        // stops with the broadcast rather than draining its receive buffer afterwards, which by then
+        // holds megabytes it would take another ten seconds to sip through.
+        let slow = {
+            let stop = shutdown.clone();
+            thread::spawn(move || {
+                let mut sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                sock.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
+                sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut sink = [0u8; 1024];
+                let until = Instant::now() + Duration::from_secs(60);
+                while Instant::now() < until && !stop.load(Ordering::SeqCst) {
+                    match sock.read(&mut sink) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => thread::sleep(Duration::from_millis(25)),
+                    }
                 }
-                thread::sleep(Duration::from_millis(25));
-            }
-        });
-        // …and one that reads as fast as it can, counting the JPEG start markers it receives.
+            })
+        };
+        // …and one that reads as fast as it can, counting the parts it receives.
         let fast = thread::spawn(move || {
             let mut sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
             sock.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
-            sock.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let mut got = 0usize;
             let mut sink = vec![0u8; 65536];
             let mut carry: Vec<u8> = Vec::new(); // a boundary may straddle two reads
-            let deadline = Instant::now() + Duration::from_secs(4);
-            while Instant::now() < deadline {
+            let until = guard();
+            while Instant::now() < until {
                 match sock.read(&mut sink) {
                     Ok(0) => break,
                     Ok(n) => {
@@ -771,23 +787,47 @@ mod tests {
             }
             got
         });
+        // The counters live in the client list, which the broadcast empties on its way out, so they
+        // are sampled while it runs.
+        let seen_drops = Arc::new(AtomicBool::new(false));
+        let sampler = {
+            let (clients, stop, flag) = (clients.clone(), shutdown.clone(), seen_drops.clone());
+            thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    if clients.lock().unwrap().iter().any(|c| c.dropped > 0) {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+            })
+        };
+
         thread::sleep(Duration::from_millis(200)); // let both connect before the source starts
 
-        let frames = 180; // 3 s at 60 fps
+        let frames = 180;
         let source = FakeCapture { buf: Vec::new(), next: Instant::now(), left: frames };
         broadcast_loop(source, clients, shutdown.clone(), None, None);
 
         let received = fast.join().unwrap();
-        let _ = slow.join();
         shutdown.store(true, Ordering::SeqCst);
+        let _ = slow.join();
+        let _ = sampler.join();
         let _ = accept.join();
 
-        // The blocking version delivered barely two thirds of these, in bursts, so the bar sits well
-        // above that — but not at 100 %, because a socket buffer that briefly fills may legitimately
-        // cost this sink a frame too.
+        // Two halves, and both are needed. The first says a healthy sink still gets its pictures;
+        // on its own it would also pass with a blocking write, which delivers everything eventually
+        // — just late and in bursts, and "late" cannot be asserted here because the scheduler's timer
+        // granularity varies by platform.
         assert!(
             received * 100 / frames >= 90,
             "the fast sink received only {received} of {frames} parts while a slow sink was attached"
+        );
+        // The second is the mechanism itself, and it is timing-free: a sink that cannot keep up must
+        // LOSE frames. If nothing was ever dropped, the broadcast waited for it instead — which is
+        // exactly the regression, and what dragged an always-fast client from 60 to 43 fps.
+        assert!(
+            seen_drops.load(Ordering::SeqCst),
+            "no frame was ever dropped for the slow sink — the broadcast is waiting on it again"
         );
     }
 
