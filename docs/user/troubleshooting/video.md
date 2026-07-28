@@ -17,18 +17,27 @@ place, see the **[Video guide](../guides/video.md)**.
 
 ## An RTSP stream won't start
 
-RTSP playback uses a small bundled engine (**go2rtc**); Kite downloads it automatically the first time
-you start an RTSP source. If a stream won't come up:
+RTSP is played in one of two ways, and which one your machine uses decides what has to be installed:
 
-- **Let the engine download finish.** The Video panel shows the go2rtc status and offers the download if
-  it's missing — RTSP can't play until it's installed. If the download fails (no internet, or an
-  unsupported CPU architecture), you'll get a hint to install it manually.
+- **The direct path** uses a small bundled engine (**go2rtc**), which Kite downloads automatically the
+  first time you start an RTSP source. This is what Windows and macOS use.
+- **The image path** uses only the **ffmpeg** helper — no go2rtc at all. Kite falls back to it where the
+  browser engine offers no direct video path (common on Linux, see below), and always for a source that
+  already sends **MJPEG**, which the direct path cannot carry.
+
+If a stream won't come up:
+
+- **Let the helper download finish.** The Video panel shows the status of whichever helper your machine
+  needs and offers the download if it's missing. If the download fails (no internet, or an unsupported
+  CPU architecture), you'll get a hint to install it manually. On a machine that only ever uses the
+  image path, go2rtc is neither required nor offered.
 - **Check the URL and reachability.** A typo, a camera that's off, a firewall, or a source on a different
   network will all stop it. Confirm the exact `rtsp://…` URL works in another player (e.g. VLC) from the
   same machine.
 - **Match the transport.** Some servers are **UDP-only** (they reject TCP clients) — set the connection's
   **Transport** to **UDP** in the Video panel (needs the ffmpeg helper). Conversely, if UDP is blocked on
-  your network, try **TCP**. **Auto** tries the native reader first and falls back to ffmpeg.
+  your network, try **TCP**. **Auto** tries the native reader first and falls back to ffmpeg. The setting
+  applies to the direct path; on the image path ffmpeg negotiates the transport itself and reads both.
 
 ## The stream keeps showing "Reconnecting…" — check the codec first
 
@@ -150,11 +159,23 @@ sustain. Two things are worth knowing:
   it removes the work at *every* stage — network, decoding, conversion and display. On a single-board
   computer, 480p at 30 fps is comfortable where 720p60 is not. Set it where the stream is produced (your
   video transmitter, camera or streaming server), not in Kite.
-- **Show the video in fewer places at once.** Every visible surface (panel preview, widget, floating
-  window) is drawn separately. Closing the ones you don't need frees noticeable load.
+- **Expect each frame to cost more here than on Windows.** Even with the conversion sorted out, the
+  picture still has to be decoded for display, and the Linux engine is markedly slower at it: on one
+  laptop the same 720×576 frame took about 13 ms against roughly 2 ms in the Windows engine, and longer
+  again while the machine was busy. That is the reason a frame rate that is effortless on Windows can be
+  out of reach on comparable Linux hardware — and the reason the point above matters so much more here.
+- **Show the video in fewer places at once.** The stream is read and decoded **once** for all of them,
+  so this costs less than it used to — but every visible surface (panel preview, widget, floating
+  window) is still drawn and composited separately, so closing the ones you don't need still helps.
 
 Converting a 720p60 stream in software is simply beyond a small machine, and no setting inside Kite
 changes that arithmetic — the picture has to get smaller or slower at the source.
+
+!!! tip "Before blaming the machine: does the stutter have a rhythm?"
+    If the picture is smooth for several seconds, hitches briefly, and then repeats that on a steady
+    beat, it is the **network link** and not the decoding — see *"The picture is smooth, then hitches"*
+    above. A machine that cannot keep up loses frames evenly; it does not deliver ten good seconds and
+    then a burst. This one cost us a long hunt through the video path before a plain `ping` settled it.
 
 ## Linux: the CPU stays busy after I stop the video
 
