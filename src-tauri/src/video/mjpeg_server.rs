@@ -22,7 +22,17 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+/// Called once when a running feed's source dies — see `commands::video::MJPEG_ENDED_EVENT`, which
+/// is what it turns into.
+///
+/// A plain callback rather than an `AppHandle` **on purpose**: this is the only module here with
+/// unit tests, so the linker pulls its object into the test binary — and with it everything it
+/// references. Naming `Emitter::emit` dragged Tauri's window runtime in, whose ComCtl32 v6 entry
+/// points (`SetWindowSubclass`, `TaskDialogIndirect`, …) only resolve for a binary carrying an
+/// application manifest. Test binaries carry none, so `cargo test` died at load with
+/// `STATUS_ENTRYPOINT_NOT_FOUND` on Windows before the harness ran a single test. Keeping Tauri out
+/// of this module keeps the test binary linkable.
+pub type EndedHook = Arc<dyn Fn() + Send + Sync>;
 
 /// Give up on a client that has not accepted a single byte for this long. Not a stutter guard — the
 /// broadcast never waits for anyone (see `Client::push`) — just the point at which a socket that
@@ -73,15 +83,6 @@ const HTTP_HEADERS_OCTET: &[u8] = b"HTTP/1.1 200 OK\r\n\
     Cache-Control: no-cache\r\n\
     Connection: close\r\n\
     \r\n";
-
-/// Emitted when a running feed's source dies (ffmpeg exited, read error) — never on our own stop.
-///
-/// The `<img>` sink cannot report this itself on WebKit: measured on 2.52.5, a multipart `<img>`
-/// fires one `load` for the whole stream and then **no** `error` and no `abort` when the server
-/// closes mid-stream, leaving the element on a dead `src` with `complete` still true. That is the
-/// whole reconnect trigger for the image path, so it comes from the backend instead, where the fact
-/// is known for certain and identically on every platform.
-pub const MJPEG_ENDED_EVENT: &str = "video-mjpeg-ended";
 
 /// What the server captures from.
 pub enum MjpegSource<'a> {
@@ -149,8 +150,9 @@ impl MjpegServer {
     /// `FIRST_FRAME_TIMEOUT`); otherwise everything is torn down again and the error carries ffmpeg's
     /// own first stderr line. Blocking by design — call it from an async command.
     ///
-    /// `app` is only used to announce a source that dies while live (`MJPEG_ENDED_EVENT`).
-    pub fn start(&self, app: &AppHandle, source: &MjpegSource) -> Result<u16, String> {
+    /// `on_ended` fires only for a source that dies while live — never for a start that failed, which
+    /// is reported through the return value instead.
+    pub fn start(&self, on_ended: EndedHook, source: &MjpegSource) -> Result<u16, String> {
         self.stop();
 
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind: {e}"))?;
@@ -269,8 +271,7 @@ impl MjpegServer {
         };
         let reader = {
             let shutdown = shutdown.clone();
-            let app = app.clone();
-            thread::spawn(move || broadcast_loop(stdout, clients, shutdown, Some(first_tx), Some(app)))
+            thread::spawn(move || broadcast_loop(stdout, clients, shutdown, Some(first_tx), on_ended))
         };
         let stderr_thread = {
             let first_err = first_err.clone();
@@ -496,7 +497,7 @@ fn broadcast_loop(
     clients: Arc<Mutex<Vec<Client>>>,
     shutdown: Arc<AtomicBool>,
     mut first: Option<Sender<()>>,
-    app: Option<AppHandle>,
+    on_ended: EndedHook,
 ) {
     let mut buf = [0u8; 65536];
     // Whole parts are assembled here before they go out, so a client that is behind loses a picture
@@ -584,12 +585,10 @@ fn broadcast_loop(
     clients.lock().unwrap().clear();
     // Then say so explicitly. Closing the sockets is enough for the off-thread reader, which reads
     // the stream itself and sees it end — but not for the `<img>` fallback on WebKit, which stays
-    // silent (see `MJPEG_ENDED_EVENT`). The order matters: sockets first, so a reader that notices by
-    // itself and the event agree on what happened.
+    // silent (see `commands::video::MJPEG_ENDED_EVENT`). The order matters: sockets first, so a
+    // reader that notices by itself and the event agree on what happened.
     if ended_live {
-        if let Some(app) = app {
-            let _ = app.emit(MJPEG_ENDED_EVENT, ());
-        }
+        on_ended();
     }
 }
 
@@ -806,7 +805,7 @@ mod tests {
 
         let frames = 180;
         let source = FakeCapture { buf: Vec::new(), next: Instant::now(), left: frames };
-        broadcast_loop(source, clients, shutdown.clone(), None, None);
+        broadcast_loop(source, clients, shutdown.clone(), None, Arc::new(|| {}));
 
         let received = fast.join().unwrap();
         shutdown.store(true, Ordering::SeqCst);
