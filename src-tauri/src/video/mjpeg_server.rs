@@ -393,10 +393,28 @@ fn wants_raw(request: &str) -> bool {
 /// multipart answer this server has always given.
 fn read_request(stream: &mut TcpStream) -> String {
     let _ = stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT));
+    // Read until the request LINE is complete, not just once. TCP is a stream: a client that builds
+    // its request in pieces (`write!` issues one syscall per format fragment, and browsers are free
+    // to split too) can have it arrive in several segments. A single read then saw `GET ` and judged
+    // the target from that — answering the raw variant with the multipart response, which is the one
+    // thing its reader cannot parse. It surfaced as a Linux-only test failure because on Windows the
+    // fragments happened to coalesce; the bug was never platform-specific.
     let mut buf = [0u8; 512];
-    let n = stream.read(&mut buf).unwrap_or(0);
+    let mut len = 0;
+    while len < buf.len() {
+        match stream.read(&mut buf[len..]) {
+            Ok(0) => break, // client hung up
+            Ok(n) => {
+                len += n;
+                if buf[..len].contains(&b'\n') {
+                    break; // first line complete — everything we read is on it
+                }
+            }
+            Err(_) => break, // timeout or error: judge on what arrived, which reads as "not raw"
+        }
+    }
     let _ = stream.set_read_timeout(None);
-    String::from_utf8_lossy(&buf[..n]).into_owned()
+    String::from_utf8_lossy(&buf[..len]).into_owned()
 }
 
 /// One connected sink. Writes are non-blocking and never waited on: a client that cannot take a
@@ -628,7 +646,17 @@ mod tests {
 
         let mut sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
         sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        write!(sock, "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").unwrap();
+        // Sent in two segments ON PURPOSE, with Nagle off so the first really goes out alone: a
+        // request line arriving split is what broke the raw variant, and a single write would only
+        // exercise that on whichever platform happens not to coalesce it — which is precisely how the
+        // bug reached CI green on Windows and red on Linux.
+        sock.set_nodelay(true).unwrap();
+        let req = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+        let (head, tail) = req.split_at(6); // mid-target, so a partial read cannot judge it
+        sock.write_all(head.as_bytes()).unwrap();
+        sock.flush().unwrap();
+        thread::sleep(Duration::from_millis(20));
+        sock.write_all(tail.as_bytes()).unwrap();
         let mut buf = [0u8; 512];
         let n = sock.read(&mut buf).unwrap();
 
