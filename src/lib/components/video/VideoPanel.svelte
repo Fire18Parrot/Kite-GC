@@ -45,6 +45,7 @@
     setNativeFramerate,
     setNativeCodec,
   } from '$lib/stores/video';
+  import { canvasSink, mjpegSink, mjpegStats } from '$lib/controllers/mjpegSink';
   import {
     codecsFor,
     codecLabel,
@@ -247,13 +248,14 @@
     ),
   );
 
-  // Info-line frame rate. The native getUserMedia path (and camera) show measured/negotiated; the
-  // native MJPEG fallback (<img> multipart) can't measure per-frame in WebView2 → show the configured
-  // rate instead of a stuck 0.
+  // Info-line frame rate. The off-thread reader counts frames itself, so an MJPEG feed finally has a
+  // real rate on every platform — the <img> fallback can only count where the WebView fires `load`
+  // per part (WebView2 does, WebKitGTK fires it once), hence the configured rate as a last resort.
   const fpsText = $derived.by(() => {
     const s = $videoState;
-    if (s.kind === 'native' && s.mjpegUrl) return String(s.nativeSel.fps);
-    const cur = s.mjpegUrl ? mjpegFps : measuredFps;
+    const drawn = $canvasSink ? ($mjpegStats?.fpsOut ?? 0) : mjpegFps;
+    if (s.kind === 'native' && s.mjpegUrl) return drawn ? drawn.toFixed(0) : String(s.nativeSel.fps);
+    const cur = s.mjpegUrl ? drawn : measuredFps;
     const curStr = cur ? cur.toFixed(0) : '–';
     return s.frameRate ? `${curStr}/${Math.round(s.frameRate)}` : curStr;
   });
@@ -304,15 +306,20 @@
   <div class="vp-body">
     <div class="preview" style="aspect-ratio: {$videoState.aspect};">
       {#if $videoState.mjpegUrl}
-        <!-- MJPEG: embedded ffmpeg server, each frame triggers onload -->
-        <!-- svelte-ignore a11y_missing_attribute -->
-        <img
-          src={$videoState.mjpegUrl}
-          alt="Live video"
-          class:mirror={$videoState.mirror}
-          onload={mjpegFrame}
-          onerror={reportMjpegError}
-        />
+        <!-- MJPEG multipart feed — off-thread reader where the WebView allows it, else an <img>
+             whose per-part `load` carries both the frame count and the picture size. -->
+        {#if $canvasSink}
+          <canvas use:mjpegSink class:mirror={$videoState.mirror}></canvas>
+        {:else}
+          <!-- svelte-ignore a11y_missing_attribute -->
+          <img
+            src={$videoState.mjpegUrl}
+            alt="Live video"
+            class:mirror={$videoState.mirror}
+            onload={mjpegFrame}
+            onerror={reportMjpegError}
+          />
+        {/if}
       {:else}
         <!-- svelte-ignore a11y_media_has_caption -->
         <video
@@ -673,8 +680,10 @@
   .preview video { width: 100%; height: 100%; object-fit: contain; display: block; will-change: transform; }
   .preview video.mirror { transform: scaleX(-1); }
   .preview video.hidden { visibility: hidden; }
-  .preview img { width: 100%; height: 100%; object-fit: contain; display: block; will-change: transform; }
-  .preview img.mirror { transform: scaleX(-1); }
+  .preview img,
+  .preview canvas { width: 100%; height: 100%; object-fit: contain; display: block; will-change: transform; }
+  .preview img.mirror,
+  .preview canvas.mirror { transform: scaleX(-1); }
   .preview-placeholder {
     position: absolute;
     inset: 0;

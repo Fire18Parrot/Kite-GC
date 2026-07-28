@@ -305,7 +305,10 @@ impl Go2Rtc {
             ffmpeg_cfg.insert("kite_hw_mjpeg".into(), "-c:v mjpeg_vaapi -async_depth 1".into());
         }
         let cfg = serde_json::json!({
-            "api": { "listen": format!("127.0.0.1:{api_port}") },
+            // `origin: "*"` makes go2rtc send `Access-Control-Allow-Origin` on its API. The WebView
+            // reads `/api/stream.mjpeg` with `fetch` from a worker (off-thread MJPEG reader), and a
+            // cross-origin fetch without that header is blocked — an <img> never needed it.
+            "api": { "listen": format!("127.0.0.1:{api_port}"), "origin": "*" },
             "rtsp": { "listen": format!("127.0.0.1:{rtsp_port}") },
             "webrtc": {
                 "listen": format!("127.0.0.1:{webrtc_port}"),

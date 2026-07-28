@@ -27,6 +27,7 @@ import {
   type NativeSelection,
   validateSelection,
 } from '$lib/helpers/videoCapabilities';
+import { setMjpegSinkHandlers, startMjpegSink, stopMjpegSink } from '$lib/controllers/mjpegSink';
 
 export interface VideoDevice {
   deviceId: string;
@@ -1007,6 +1008,21 @@ export function reportMjpegError(): void {
   logVideo('warn', `MJPEG image failed to load (${st.mjpegUrl})`);
   patch({ status: 'error', mjpegUrl: null, error: get(t)('video.mjpegLoadFailed') });
 }
+
+// ── Off-thread MJPEG reader ──────────────────────────────────────────────────────────────────────
+// Where the WebView can do it, the multipart feed is read, decoded and drawn by a worker instead of
+// by an <img> on the main thread (see controllers/mjpegWorker.ts). The surfaces branch on the
+// `canvasSink` store; the stream itself follows `mjpegUrl`, which every path — RTSP MJPEG, native
+// capture, stop, reconnect — already sets or clears, so one subscription covers all of them. Both
+// calls are no-ops while the reader isn't in use.
+setMjpegSinkHandlers({ onSize: reportVideoSize, onError: reportMjpegError });
+let mjpegSinkUrl: string | null = null;
+videoState.subscribe((s) => {
+  if (s.mjpegUrl === mjpegSinkUrl) return;
+  mjpegSinkUrl = s.mjpegUrl;
+  if (mjpegSinkUrl) startMjpegSink(mjpegSinkUrl);
+  else stopMjpegSink();
+});
 
 /** Open a native capture device via ffmpeg → the embedded MJPEG server → `<img>`. This path is
  *  deliberately independent of getUserMedia/WebKit: the backend enumerates and opens the exact device

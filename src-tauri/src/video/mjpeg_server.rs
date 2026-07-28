@@ -30,8 +30,12 @@ const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// The multipart HTTP response preamble sent once per client before the frame stream.
+/// `Access-Control-Allow-Origin` is required because the WebView reads this stream with `fetch` from
+/// a worker (the off-thread MJPEG reader) — a cross-origin fetch without it is blocked. An `<img>`,
+/// which is what the fallback path still uses, never needed the header.
 const HTTP_HEADERS: &[u8] = b"HTTP/1.1 200 OK\r\n\
     Content-Type: multipart/x-mixed-replace; boundary=ffmpeg\r\n\
+    Access-Control-Allow-Origin: *\r\n\
     Cache-Control: no-cache\r\n\
     Connection: close\r\n\
     \r\n";
