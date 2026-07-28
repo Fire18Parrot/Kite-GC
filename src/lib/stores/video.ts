@@ -683,6 +683,9 @@ async function negotiateWebrtc(url: string, useFfmpeg: boolean): Promise<void> {
   const pc = new RTCPeerConnection({ iceServers: [] });
   rtcConn = pc;
   pc.addTransceiver('video', { direction: 'recvonly' });
+  pc.oniceconnectionstatechange = () => {
+    if (rtcConn === pc) logVideo('debug', `ICE state: ${pc.iceConnectionState}`);
+  };
   pc.ontrack = (e) => {
     if (rtcConn !== pc) return;
     const stream = e.streams[0] ?? new MediaStream([e.track]);
@@ -693,6 +696,7 @@ async function negotiateWebrtc(url: string, useFfmpeg: boolean): Promise<void> {
     // A genuine drop (failed) enters the infinite reconnect loop; 'closed' is our own teardown.
     if (rtcConn === pc && pc.connectionState === 'failed') {
       logVideo('warn', 'WebRTC peer connection failed');
+      void logIceOutcome(pc);
       scheduleRtspReconnect();
     }
   };
@@ -700,12 +704,91 @@ async function negotiateWebrtc(url: string, useFfmpeg: boolean): Promise<void> {
   await pc.setLocalDescription(offer);
   await waitIceGathering(pc);
   if (rtcConn !== pc) return; // stopped while gathering
+  const local = candidateLines(pc.localDescription?.sdp ?? offer.sdp ?? '');
+  lastIce = { local, remote: [] };
+  logVideo('debug', `ICE local candidates (${local.length}, gathering=${pc.iceGatheringState}): ${local.join(' · ') || 'NONE'}`);
   const answerSdp = await invoke<string>('video_webrtc_offer', {
     sdp: pc.localDescription?.sdp ?? offer.sdp,
   });
   if (rtcConn !== pc) return;
+  const remote = candidateLines(answerSdp);
+  lastIce.remote = remote;
+  logVideo('debug', `ICE remote candidates (${remote.length}): ${remote.join(' · ') || 'NONE'}`);
   await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
   patch({ rtspEngine: useFfmpeg ? 'ffmpeg' : 'native' });
+}
+
+// ── ICE diagnostics ──────────────────────────────────────────────────────────────────────────────
+// Everything about go2rtc is logged; about our own peer connection, nothing was. When a stream came
+// up black with `peer connection failed` and no inbound-rtp, there was no way to tell whether the
+// browser had even produced a candidate able to reach go2rtc's loopback address — the failure looked
+// identical from outside whatever the cause.
+//
+// Level split: the per-negotiation lines are `debug` (one pair of them on every stream start would
+// otherwise fill a tester's log for a feed that is working), while the failure dump repeats them at
+// `warn`. So normal operation stays quiet and a broken connection still reports itself in full,
+// without anyone having to reproduce it under `--debug` first.
+
+/** Candidate summaries of the negotiation in progress, replayed by `logIceOutcome` when it fails. */
+let lastIce: { local: string[]; remote: string[] } = { local: [], remote: [] };
+
+/** `a=candidate:1 1 udp 2130706431 127.0.0.1 51319 typ host …` → `host/udp 127.0.0.1:51319`. */
+function candidateLines(sdp: string): string[] {
+  return sdp
+    .split(/\r?\n/)
+    .filter((l) => l.startsWith('a=candidate:'))
+    .map((l) => {
+      const p = l.slice('a=candidate:'.length).split(' ');
+      const typ = p[p.indexOf('typ') + 1] ?? '?';
+      return `${typ}/${p[2] ?? '?'} ${p[4] ?? '?'}:${p[5] ?? '?'}`;
+    });
+}
+
+/** Which pairs ICE actually tried, and how far each got. `requestsSent` with no `responsesReceived`
+ *  means our checks went unanswered; no pairs at all means the two sides never had a route to try. */
+async function logIceOutcome(pc: RTCPeerConnection): Promise<void> {
+  interface PairStats extends RTCStats {
+    localCandidateId: string;
+    remoteCandidateId: string;
+    state?: string;
+    nominated?: boolean;
+    requestsSent?: number;
+    responsesReceived?: number;
+  }
+  interface CandStats extends RTCStats {
+    address?: string;
+    port?: number;
+    protocol?: string;
+    candidateType?: string;
+  }
+  try {
+    const stats = await pc.getStats();
+    const named = new Map<string, string>();
+    stats.forEach((r) => {
+      if (r.type !== 'local-candidate' && r.type !== 'remote-candidate') return;
+      const c = r as CandStats;
+      named.set(c.id, `${c.candidateType ?? '?'}/${c.protocol ?? '?'} ${c.address ?? '?'}:${c.port ?? '?'}`);
+    });
+    const pairs: string[] = [];
+    stats.forEach((r) => {
+      if (r.type !== 'candidate-pair') return;
+      const p = r as PairStats;
+      const from = named.get(p.localCandidateId) ?? p.localCandidateId;
+      const to = named.get(p.remoteCandidateId) ?? p.remoteCandidateId;
+      pairs.push(
+        `${from} → ${to} [${p.state ?? '?'}${p.nominated ? ' nominated' : ''}]` +
+          ` sent=${p.requestsSent ?? 0} answered=${p.responsesReceived ?? 0}`,
+      );
+    });
+    logVideo('warn', `ICE pairs tried (${pairs.length}): ${pairs.join(' · ') || 'NONE'}`);
+    logVideo(
+      'warn',
+      `ICE candidates were local (${lastIce.local.length}): ${lastIce.local.join(' · ') || 'NONE'}` +
+        ` — remote (${lastIce.remote.length}): ${lastIce.remote.join(' · ') || 'NONE'}`,
+    );
+  } catch (e) {
+    logVideo('warn', `ICE stats unavailable: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 // ── RTSP auto-reconnect (infinite until frames return or the user stops) ──────────────────────────
