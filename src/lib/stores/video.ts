@@ -19,6 +19,7 @@
 
 import { writable, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { t } from 'svelte-i18n';
 import { isLinux } from '$lib/platform';
 import {
@@ -1030,7 +1031,11 @@ export function reportMjpegError(): void {
 // `canvasSink` store; the stream itself follows `mjpegUrl`, which every path — RTSP MJPEG, native
 // capture, stop, reconnect — already sets or clears, so one subscription covers all of them. Both
 // calls are no-ops while the reader isn't in use.
-setMjpegSinkHandlers({ onSize: reportVideoSize, onError: reportMjpegError });
+setMjpegSinkHandlers({
+  onSize: reportVideoSize,
+  onError: reportMjpegError,
+  onLog: (level, message) => logVideo(level, message),
+});
 let mjpegSinkUrl: string | null = null;
 videoState.subscribe((s) => {
   if (s.mjpegUrl === mjpegSinkUrl) return;
@@ -1373,6 +1378,12 @@ function logWebViewMediaSupport(): void {
  */
 export async function initVideo(): Promise<void> {
   logWebViewMediaSupport();
+  // The backend's word that a live MJPEG source died (`MJPEG_ENDED_EVENT` in `mjpeg_server.rs`).
+  // The off-thread reader notices by itself because it reads the stream — the `<img>` fallback
+  // cannot: on WebKit a multipart `<img>` fires **no** error event when the server closes mid-stream
+  // (measured on 2.52.5), so the picture sat on a dead `src` with `complete` still true and nothing
+  // ever started a reconnect. One signal, same on every platform and both render paths.
+  void listen('video-mjpeg-ended', () => reportMjpegError()).catch(() => {});
   // Skip getUserMedia enumeration at startup on Linux: it drives WebKit's GStreamer capture stack
   // (pipewire), which hangs ~35 s and freezes launch on boxes with an unreachable pipewire (the
   // symptom the native/MJPEG path was meant to avoid). Only the `camera` source needs this list, and

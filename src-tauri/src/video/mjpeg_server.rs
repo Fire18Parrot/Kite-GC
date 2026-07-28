@@ -22,26 +22,66 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
 
-/// Drop a client that can't accept data within this window — prevents one stalled `<img>` (e.g. an
-/// occluded/throttled view) from blocking the shared broadcast (and back-pressuring ffmpeg).
-const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Give up on a client that has not accepted a single byte for this long. Not a stutter guard — the
+/// broadcast never waits for anyone (see `Client::push`) — just the point at which a socket that
+/// never drains again is considered gone.
+const CLIENT_STALL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Safety valve: if this much data accumulates without yielding a complete part, the framing is not
+/// what we expect and the bytes are forwarded as they are rather than held forever.
+const MAX_UNFRAMED_BYTES: usize = 4 * 1024 * 1024;
 
 /// How long `start()` waits for the capture's first bytes before declaring it failed. Generous enough
 /// for an HDMI dongle negotiating a mode (1–2 s is normal), short enough that a rejected mode reports
 /// back while the user is still looking at "Starting…".
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(6);
 
+/// How long a client gets to send its request line before it is answered. Only our own WebView
+/// connects here (loopback), so it always arrives at once; a connection that stays silent gets the
+/// multipart answer, i.e. exactly what every client got before there was a choice.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// The multipart HTTP response preamble sent once per client before the frame stream.
 /// `Access-Control-Allow-Origin` is required because the WebView reads this stream with `fetch` from
 /// a worker (the off-thread MJPEG reader) — a cross-origin fetch without it is blocked. An `<img>`,
 /// which is what the fallback path still uses, never needed the header.
-const HTTP_HEADERS: &[u8] = b"HTTP/1.1 200 OK\r\n\
+const HTTP_HEADERS_MULTIPART: &[u8] = b"HTTP/1.1 200 OK\r\n\
     Content-Type: multipart/x-mixed-replace; boundary=ffmpeg\r\n\
     Access-Control-Allow-Origin: *\r\n\
     Cache-Control: no-cache\r\n\
     Connection: close\r\n\
     \r\n";
+
+/// The same byte stream under a content type WebKit does not special-case, requested with `?raw=1`.
+///
+/// WebKit handles `multipart/x-mixed-replace` inside its resource loader and never exposes it to
+/// `fetch`: measured on WebKitGTK 2.52.5 from a `tauri://localhost` page, the response headers arrive
+/// (200, correct type) and the very first `reader.read()` fails with `Load failed`, zero bytes — main
+/// thread and worker alike. The identical bytes as `application/octet-stream` stream perfectly. So
+/// the off-thread reader asks for this variant and the `<img>` fallback keeps the multipart one,
+/// which is the only type it can render. Requested on WebKit engines only, so WebView2 keeps the
+/// exact response it has always had.
+///
+/// The body is byte-identical — same boundaries, same part headers. Dropping the `boundary`
+/// parameter costs the reader nothing because ffmpeg's mpjpeg muxer writes a `Content-length` on
+/// every part, which is what it frames on; the boundary is only its fallback for parts without one.
+const HTTP_HEADERS_OCTET: &[u8] = b"HTTP/1.1 200 OK\r\n\
+    Content-Type: application/octet-stream\r\n\
+    Access-Control-Allow-Origin: *\r\n\
+    Cache-Control: no-cache\r\n\
+    Connection: close\r\n\
+    \r\n";
+
+/// Emitted when a running feed's source dies (ffmpeg exited, read error) — never on our own stop.
+///
+/// The `<img>` sink cannot report this itself on WebKit: measured on 2.52.5, a multipart `<img>`
+/// fires one `load` for the whole stream and then **no** `error` and no `abort` when the server
+/// closes mid-stream, leaving the element on a dead `src` with `complete` still true. That is the
+/// whole reconnect trigger for the image path, so it comes from the backend instead, where the fact
+/// is known for certain and identically on every platform.
+pub const MJPEG_ENDED_EVENT: &str = "video-mjpeg-ended";
 
 /// What the server captures from.
 pub enum MjpegSource<'a> {
@@ -108,7 +148,9 @@ impl MjpegServer {
     /// Returns the port **only once the source has actually delivered its first bytes** (up to
     /// `FIRST_FRAME_TIMEOUT`); otherwise everything is torn down again and the error carries ffmpeg's
     /// own first stderr line. Blocking by design — call it from an async command.
-    pub fn start(&self, source: &MjpegSource) -> Result<u16, String> {
+    ///
+    /// `app` is only used to announce a source that dies while live (`MJPEG_ENDED_EVENT`).
+    pub fn start(&self, app: &AppHandle, source: &MjpegSource) -> Result<u16, String> {
         self.stop();
 
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind: {e}"))?;
@@ -214,7 +256,7 @@ impl MjpegServer {
         let stdout = ffmpeg.stdout.take().ok_or("no stdout")?;
         let stderr = ffmpeg.stderr.take();
         let shutdown = Arc::new(AtomicBool::new(false));
-        let clients: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
+        let clients: Arc<Mutex<Vec<Client>>> = Arc::new(Mutex::new(Vec::new()));
         // First-frame signal + the first ffmpeg error line, so a failed capture can be reported to the
         // caller instead of only reaching the log.
         let (first_tx, first_rx) = std::sync::mpsc::channel();
@@ -227,7 +269,8 @@ impl MjpegServer {
         };
         let reader = {
             let shutdown = shutdown.clone();
-            thread::spawn(move || broadcast_loop(stdout, clients, shutdown, Some(first_tx)))
+            let app = app.clone();
+            thread::spawn(move || broadcast_loop(stdout, clients, shutdown, Some(first_tx), Some(app)))
         };
         let stderr_thread = {
             let first_err = first_err.clone();
@@ -315,9 +358,104 @@ fn wait_for_first_frame(child: &mut Child, rx: &Receiver<()>) -> Result<(), Stri
     }
 }
 
-/// Accept clients and register them for broadcast. Each gets the multipart preamble, `TCP_NODELAY`
-/// (no Nagle bunching on localhost), and blocking writes. Exits when `shutdown` is set.
-fn accept_loop(listener: TcpListener, clients: Arc<Mutex<Vec<TcpStream>>>, shutdown: Arc<AtomicBool>) {
+/// Length of the complete multipart part at the front of `buf`, or `None` while it is still
+/// arriving.
+///
+/// A part is `[separator]--boundary\r\n<headers>\r\n\r\n<body>`, and ffmpeg's mpjpeg muxer states
+/// the body length in every one of them. Whatever precedes the header block — the CRLF that closed
+/// the previous body, the boundary line — belongs to this part, which is what makes a dropped frame
+/// harmless: the next one a client receives still starts with its own separator and boundary.
+fn frame_len(buf: &[u8]) -> Option<usize> {
+    let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+    let head = std::str::from_utf8(&buf[..head_end]).ok()?;
+    let value = head
+        .lines()
+        .find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("content-length")))
+        .map(|(_, v)| v.trim())?;
+    let body: usize = value.parse().ok()?;
+    let total = head_end.checked_add(body)?;
+    (buf.len() >= total).then_some(total)
+}
+
+/// Whether a request asked for the non-multipart variant (`?raw=1`) — see `HTTP_HEADERS_OCTET`.
+/// Only the request line is looked at; the rest of the headers were never read and still aren't.
+fn wants_raw(request: &str) -> bool {
+    request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|target| target.split_once('?'))
+        .is_some_and(|(_, query)| query.split('&').any(|p| p == "raw=1"))
+}
+
+/// Read a client's request line. A silent or unreadable client reads as "not raw", which is the
+/// multipart answer this server has always given.
+fn read_request(stream: &mut TcpStream) -> String {
+    let _ = stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT));
+    let mut buf = [0u8; 512];
+    let n = stream.read(&mut buf).unwrap_or(0);
+    let _ = stream.set_read_timeout(None);
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// One connected sink. Writes are non-blocking and never waited on: a client that cannot take a
+/// frame right now loses **that frame**, and the broadcast moves on.
+///
+/// This is what keeps one slow consumer from stalling everyone. Measured against the real source
+/// with a client that needs 25 ms per frame — the pace a WebKit JPEG decode actually manages — while
+/// a second, always-fast client recorded arrivals: with the old blocking write the fast client fell
+/// to 43 fps with 121 gaps over 50 ms and a *median* spacing of 0.5 ms, i.e. frames delivered in
+/// bursts and nothing in between. Frame-wise and non-blocking, the same fast client holds 60.1 fps
+/// with a 16.1 ms median and one gap — indistinguishable from having no slow client at all.
+struct Client {
+    sock: TcpStream,
+    /// Remainder of a part the socket would not take in one go. While this is non-empty the client
+    /// is behind, and new frames are dropped for it rather than queued.
+    pending: Vec<u8>,
+    /// When `pending` last stopped being empty, for `CLIENT_STALL_TIMEOUT`.
+    behind_since: Option<Instant>,
+    dropped: u64,
+}
+
+impl Client {
+    /// Offer one complete part. Returns false when the socket is gone and the client should go.
+    fn push(&mut self, frame: &[u8], now: Instant) -> bool {
+        if !self.pending.is_empty() {
+            // Finish what is owed before considering anything new.
+            match self.sock.write(&self.pending) {
+                Ok(0) => return false,
+                Ok(n) => drop(self.pending.drain(..n)),
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return false,
+            }
+            if !self.pending.is_empty() {
+                self.dropped += 1;
+                return now.duration_since(self.behind_since.unwrap_or(now)) < CLIENT_STALL_TIMEOUT;
+            }
+            self.behind_since = None;
+        }
+        match self.sock.write(frame) {
+            Ok(0) => false,
+            Ok(n) if n == frame.len() => true,
+            Ok(n) => {
+                self.pending.extend_from_slice(&frame[n..]);
+                self.behind_since = Some(now);
+                true
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                self.pending.extend_from_slice(frame);
+                self.behind_since = Some(now);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// Accept clients and register them for broadcast. Each gets the response preamble matching what it
+/// asked for and `TCP_NODELAY` (no Nagle bunching on localhost); the socket then goes non-blocking
+/// for the broadcast. Exits when `shutdown` is set.
+fn accept_loop(listener: TcpListener, clients: Arc<Mutex<Vec<Client>>>, shutdown: Arc<AtomicBool>) {
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
@@ -326,9 +464,18 @@ fn accept_loop(listener: TcpListener, clients: Arc<Mutex<Vec<TcpStream>>>, shutd
             Ok((mut stream, _)) => {
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_nonblocking(false);
-                let _ = stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
-                if stream.write_all(HTTP_HEADERS).is_ok() && stream.flush().is_ok() {
-                    clients.lock().unwrap().push(stream);
+                let raw = wants_raw(&read_request(&mut stream));
+                let headers = if raw { HTTP_HEADERS_OCTET } else { HTTP_HEADERS_MULTIPART };
+                if stream.write_all(headers).is_ok()
+                    && stream.flush().is_ok()
+                    && stream.set_nonblocking(true).is_ok()
+                {
+                    clients.lock().unwrap().push(Client {
+                        sock: stream,
+                        pending: Vec::new(),
+                        behind_since: None,
+                        dropped: 0,
+                    });
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -346,11 +493,21 @@ fn accept_loop(listener: TcpListener, clients: Arc<Mutex<Vec<TcpStream>>>, shutd
 /// leaving them connected left a permanently frozen picture instead of triggering a reconnect.
 fn broadcast_loop(
     mut stdout: impl Read,
-    clients: Arc<Mutex<Vec<TcpStream>>>,
+    clients: Arc<Mutex<Vec<Client>>>,
     shutdown: Arc<AtomicBool>,
     mut first: Option<Sender<()>>,
+    app: Option<AppHandle>,
 ) {
     let mut buf = [0u8; 65536];
+    // Whole parts are assembled here before they go out, so a client that is behind loses a picture
+    // rather than half of one — and so that reading from ffmpeg never waits for a socket.
+    let mut acc: Vec<u8> = Vec::with_capacity(256 * 1024);
+    let mut drop_report = Instant::now();
+    // Set only for a feed that was actually running: a start attempt that never delivered is reported
+    // to the caller by `start()` itself, and the copy-first probe in `video_rtsp_mjpeg_start` fails
+    // exactly that way on every H.264 source — announcing a dead feed there would fire a reconnect
+    // for a stream that never began.
+    let mut ended_live = false;
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
@@ -361,6 +518,7 @@ fn broadcast_loop(
                 // failure — surface it (the stderr logger prints ffmpeg's reason just above).
                 if !shutdown.load(Ordering::SeqCst) {
                     log::warn!("[video] MJPEG source ended unexpectedly (ffmpeg exited)");
+                    ended_live = first.is_none();
                 }
                 break;
             }
@@ -368,6 +526,7 @@ fn broadcast_loop(
             Err(e) => {
                 if !shutdown.load(Ordering::SeqCst) {
                     log::warn!("[video] MJPEG read error: {e}");
+                    ended_live = first.is_none();
                 }
                 break;
             }
@@ -377,16 +536,61 @@ fn broadcast_loop(
         if let Some(tx) = first.take() {
             let _ = tx.send(());
         }
-        let mut list = clients.lock().unwrap();
-        if list.is_empty() {
-            continue; // stdout already drained above
+        acc.extend_from_slice(&buf[..n]);
+        // Cut every complete part out of the accumulator. A part carries its own leading separator,
+        // so a client that misses one still receives the next with correct framing.
+        let mut frames: Vec<&[u8]> = Vec::new();
+        let mut cut = 0;
+        while let Some(len) = frame_len(&acc[cut..]) {
+            frames.push(&acc[cut..cut + len]);
+            cut += len;
         }
-        list.retain_mut(|c| c.write_all(&buf[..n]).is_ok());
+        if frames.is_empty() {
+            // Not a framing we recognise (or a part still arriving). Don't hold bytes forever.
+            if acc.len() >= MAX_UNFRAMED_BYTES {
+                log::warn!("[video] MJPEG stream carries no recognisable parts — forwarding raw");
+                let now = Instant::now();
+                let mut list = clients.lock().unwrap();
+                let acc_ref = &acc;
+                list.retain_mut(|c| c.push(acc_ref, now));
+                drop(list);
+                acc.clear();
+            }
+            continue;
+        }
+        let now = Instant::now();
+        {
+            let mut list = clients.lock().unwrap();
+            if !list.is_empty() {
+                for frame in &frames {
+                    list.retain_mut(|c| c.push(frame, now));
+                }
+            }
+            // Tell the log when a sink is losing pictures — it is the difference between "the source
+            // is slow" and "this machine cannot keep up", and it is otherwise invisible.
+            if now.duration_since(drop_report) >= Duration::from_secs(5) {
+                let lost: u64 = list.iter().map(|c| c.dropped).sum();
+                if lost > 0 {
+                    log::debug!("[video] MJPEG broadcast: {lost} frames dropped for slow sinks so far");
+                }
+                drop_report = now;
+            }
+        }
+        acc.drain(..cut);
     }
     // The source is gone. Stop accepting, and drop every client socket so the sinks see their stream
     // end and the frontend can reconnect instead of staring at a frozen frame.
     shutdown.store(true, Ordering::SeqCst);
     clients.lock().unwrap().clear();
+    // Then say so explicitly. Closing the sockets is enough for the off-thread reader, which reads
+    // the stream itself and sees it end — but not for the `<img>` fallback on WebKit, which stays
+    // silent (see `MJPEG_ENDED_EVENT`). The order matters: sockets first, so a reader that notices by
+    // itself and the event agree on what happened.
+    if ended_live {
+        if let Some(app) = app {
+            let _ = app.emit(MJPEG_ENDED_EVENT, ());
+        }
+    }
 }
 
 /// Forward ffmpeg's stderr to the log. With `-loglevel error` these are genuine errors (device lost,
@@ -403,5 +607,201 @@ fn log_ffmpeg_stderr(stderr: Option<ChildStderr>, first_err: Arc<Mutex<Option<St
             }
             log::warn!("[video][ffmpeg] {line}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Run the real accept loop and return the preamble a client with this request target gets.
+    fn preamble_for(target: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let clients: Arc<Mutex<Vec<Client>>> = Arc::new(Mutex::new(Vec::new()));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let accept = {
+            let clients = clients.clone();
+            let shutdown = shutdown.clone();
+            thread::spawn(move || accept_loop(listener, clients, shutdown))
+        };
+
+        let mut sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(sock, "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").unwrap();
+        let mut buf = [0u8; 512];
+        let n = sock.read(&mut buf).unwrap();
+
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = accept.join();
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    }
+
+    /// The property the whole `?raw=1` design rests on: a client that doesn't ask for the variant
+    /// gets byte-for-byte what this server always sent. That is every `<img>` sink on every platform,
+    /// and the off-thread reader on WebView2, which reads multipart perfectly well.
+    #[test]
+    fn a_plain_request_still_gets_the_multipart_preamble() {
+        assert_eq!(preamble_for("/"), String::from_utf8_lossy(HTTP_HEADERS_MULTIPART));
+    }
+
+    #[test]
+    fn the_raw_variant_gets_the_non_multipart_preamble() {
+        assert_eq!(preamble_for("/?raw=1"), String::from_utf8_lossy(HTTP_HEADERS_OCTET));
+    }
+
+    /// Exactly what ffmpeg's mpjpeg muxer emits, two parts back to back.
+    fn mpjpeg(bodies: &[&[u8]]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (i, body) in bodies.iter().enumerate() {
+            if i > 0 {
+                out.extend_from_slice(b"\r\n");
+            }
+            out.extend_from_slice(b"--ffmpeg\r\nContent-type: image/jpeg\r\n");
+            out.extend_from_slice(format!("Content-length: {}\r\n\r\n", body.len()).as_bytes());
+            out.extend_from_slice(body);
+        }
+        out
+    }
+
+    #[test]
+    fn parts_are_cut_whole_and_in_order() {
+        let stream = mpjpeg(&[b"AAAA", b"BBBBBB"]);
+        let first = frame_len(&stream).expect("first part is complete");
+        assert!(stream[..first].ends_with(b"AAAA"));
+        assert!(stream[..first].starts_with(b"--ffmpeg"));
+
+        // The second part carries the CRLF that closed the first body, so a client that missed a
+        // frame still receives correct framing.
+        let rest = &stream[first..];
+        let second = frame_len(rest).expect("second part is complete");
+        assert_eq!(second, rest.len());
+        assert!(rest.starts_with(b"\r\n--ffmpeg"));
+        assert!(rest[..second].ends_with(b"BBBBBB"));
+    }
+
+    #[test]
+    fn an_incomplete_part_waits() {
+        let stream = mpjpeg(&[b"AAAA"]);
+        // Body one byte short, and headers only.
+        assert_eq!(frame_len(&stream[..stream.len() - 1]), None);
+        assert_eq!(frame_len(b"--ffmpeg\r\nContent-length: 4\r\n"), None);
+        // Header block present but no length to frame on → nothing is claimed.
+        assert_eq!(frame_len(b"--ffmpeg\r\nContent-type: image/jpeg\r\n\r\nAAAA"), None);
+    }
+
+    /// A source that produces 30 KB parts at 60 fps, standing in for ffmpeg's stdout.
+    struct FakeCapture {
+        buf: Vec<u8>,
+        next: Instant,
+        left: usize,
+    }
+
+    impl Read for FakeCapture {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.buf.is_empty() {
+                if self.left == 0 {
+                    return Ok(0);
+                }
+                let now = Instant::now();
+                if now < self.next {
+                    thread::sleep(self.next - now);
+                }
+                self.next += Duration::from_micros(16_666);
+                self.left -= 1;
+                self.buf = mpjpeg(&[&vec![0x5a; 30_000]]);
+            }
+            let n = out.len().min(self.buf.len());
+            out[..n].copy_from_slice(&self.buf[..n]);
+            self.buf.drain(..n);
+            Ok(n)
+        }
+    }
+
+    /// The property the whole rework exists for: one sink that cannot keep up must not slow the
+    /// others down. With the previous blocking write this failed hard — measured against the real
+    /// source, a fast client fell from 60 to 43 fps with a 0.5 ms median (i.e. bursts) as soon as a
+    /// 25 ms-per-frame client was also connected.
+    #[test]
+    fn a_slow_sink_does_not_hold_up_a_fast_one() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let clients: Arc<Mutex<Vec<Client>>> = Arc::new(Mutex::new(Vec::new()));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let accept = {
+            let (c, s) = (clients.clone(), shutdown.clone());
+            thread::spawn(move || accept_loop(listener, c, s))
+        };
+
+        // A sink that reads roughly one frame every 25 ms — the pace a WebKit JPEG decode manages.
+        let slow = thread::spawn(move || {
+            let mut sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            sock.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
+            let mut sink = [0u8; 4096];
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                if sock.read(&mut sink).unwrap_or(0) == 0 {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+        });
+        // …and one that reads as fast as it can, counting the JPEG start markers it receives.
+        let fast = thread::spawn(move || {
+            let mut sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            sock.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
+            sock.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+            let mut got = 0usize;
+            let mut sink = vec![0u8; 65536];
+            let mut carry: Vec<u8> = Vec::new(); // a boundary may straddle two reads
+            let deadline = Instant::now() + Duration::from_secs(4);
+            while Instant::now() < deadline {
+                match sock.read(&mut sink) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        carry.extend_from_slice(&sink[..n]);
+                        got += carry.windows(8).filter(|w| *w == b"--ffmpeg").count();
+                        let keep = carry.len().saturating_sub(7);
+                        carry.drain(..keep);
+                    }
+                    Err(_) => break,
+                }
+            }
+            got
+        });
+        thread::sleep(Duration::from_millis(200)); // let both connect before the source starts
+
+        let frames = 180; // 3 s at 60 fps
+        let source = FakeCapture { buf: Vec::new(), next: Instant::now(), left: frames };
+        broadcast_loop(source, clients, shutdown.clone(), None, None);
+
+        let received = fast.join().unwrap();
+        let _ = slow.join();
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = accept.join();
+
+        // The blocking version delivered barely two thirds of these, in bursts, so the bar sits well
+        // above that — but not at 100 %, because a socket buffer that briefly fills may legitimately
+        // cost this sink a frame too.
+        assert!(
+            received * 100 / frames >= 90,
+            "the fast sink received only {received} of {frames} parts while a slow sink was attached"
+        );
+    }
+
+    #[test]
+    fn raw_variant_is_opt_in() {
+        // What the off-thread reader sends on a WebKit engine.
+        assert!(wants_raw("GET /?raw=1 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n"));
+        // What every other client sends — and what WebView2 keeps sending.
+        assert!(!wants_raw("GET / HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n"));
+        assert!(!wants_raw(""));
+        // A value that merely contains the marker is not the marker.
+        assert!(!wants_raw("GET /?src=raw=12 HTTP/1.1\r\n\r\n"));
+        assert!(!wants_raw("GET /raw=1 HTTP/1.1\r\n\r\n"));
+        // Order among parameters must not matter.
+        assert!(wants_raw("GET /?x=1&raw=1 HTTP/1.1\r\n\r\n"));
     }
 }

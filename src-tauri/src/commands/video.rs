@@ -288,6 +288,7 @@ pub fn video_probe_device(id: String) -> Vec<native::CaptureMode> {
 /// requested mode used to leave the UI showing "live" over a black frame (see `MjpegServer::start`).
 #[tauri::command(async)]
 pub fn video_native_mjpeg_start(
+    app: AppHandle,
     id: String,
     codec: String,
     width: u32,
@@ -300,7 +301,7 @@ pub fn video_native_mjpeg_start(
     // to accelerate) and the raw-input case measured only ~21 % better on VAAPI because the upload
     // eats most of the gain, so it stays in software.
     let transcode = if native::needs_transcode(&spec.codec) { "software" } else { "copy" };
-    let port = mjpeg.start(&MjpegSource::Device(&spec))?;
+    let port = mjpeg.start(&app, &MjpegSource::Device(&spec))?;
     Ok(serde_json::json!({ "url": format!("http://127.0.0.1:{port}/"), "transcode": transcode }))
 }
 
@@ -318,6 +319,7 @@ pub fn video_native_mjpeg_start(
 /// after a failed WebRTC negotiation, settling for a transcode would be a permanent downgrade.
 #[tauri::command(async)]
 pub fn video_rtsp_mjpeg_start(
+    app: AppHandle,
     url: String,
     require_copy: bool,
     allow_hw_decode: Option<bool>,
@@ -332,7 +334,7 @@ pub fn video_rtsp_mjpeg_start(
     // the only way to know — the mpjpeg muxer rejects anything that isn't MJPEG, so the attempt costs
     // a failed spawn rather than a probe.
     let copy = MjpegSource::Rtsp { url: &url, transcode: RtspTranscode::Copy };
-    match mjpeg.start(&copy) {
+    match mjpeg.start(&app, &copy) {
         Ok(port) => {
             log::info!("[video] RTSP source already carries MJPEG — stream-copied, no transcode");
             return Ok(reply(port, RtspTranscode::Copy));
@@ -353,7 +355,7 @@ pub fn video_rtsp_mjpeg_start(
     } else {
         RtspTranscode::Software
     };
-    let port = mjpeg.start(&MjpegSource::Rtsp { url: &url, transcode })?;
+    let port = mjpeg.start(&app, &MjpegSource::Rtsp { url: &url, transcode })?;
     log::info!("[video] RTSP MJPEG transcode running ({})", transcode.label());
     Ok(reply(port, transcode))
 }

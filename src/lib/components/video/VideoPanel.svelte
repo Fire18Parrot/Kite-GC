@@ -275,10 +275,21 @@
 
   // Codec + bitrate for a network stream, from whichever pipeline is carrying it. Both are facts
   // about the feed the user is looking at, and neither was visible outside the Debug Monitor.
+  // On the image path this used to read "MJPEG" for every source, because MJPEG is what reaches the
+  // screen — true, and not what the user is asking. The transcode verdict answers the real question:
+  // the backend only gets `copy` when the mpjpeg muxer accepted the source's own packets, which no
+  // codec but MJPEG survives. Anything else was decoded and re-encoded, and the only other codec Kite
+  // supports over RTSP is H.264.
+  //
+  // Both ends are named on the transcode path, because the bitrate next to it is the MJPEG one and
+  // reading a source's codec beside the pipeline's output rate is how "3 Mbit H.264" turns into a
+  // puzzling 25 Mbit/s. The source's own bitrate is not on offer: ffmpeg reports what it writes, not
+  // what a live RTSP input costs.
   const streamCodec = $derived.by(() => {
     const s = $videoState;
     if (s.kind !== 'rtsp' || s.status !== 'live') return null;
-    return s.mjpegUrl ? 'MJPEG' : ($videoRtcStats?.codec ?? null);
+    if (!s.mjpegUrl) return $videoRtcStats?.codec ?? null;
+    return s.activeTranscode === 'copy' ? 'MJPEG' : 'H.264 → MJPEG';
   });
   const streamBitrate = $derived.by(() => {
     const s = $videoState;
