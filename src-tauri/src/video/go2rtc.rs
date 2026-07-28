@@ -599,8 +599,23 @@ fn free_loopback_port() -> Result<u16, String> {
 /// panics go2rtc on the first ICE operation. UDP first (that's the binding that must succeed), then
 /// TCP verified while the UDP socket is still held.
 fn free_loopback_webrtc_port() -> Result<u16, String> {
+    // Every rejected UDP socket is HELD until we are done, and the attempt count is far above the
+    // width of a reserved block. Both are needed on Windows, where Hyper-V/WSL/Docker reserve blocks
+    // of the dynamic range and a bind into one fails with a *permission* error (WSAEACCES 10013)
+    // rather than "in use". Those blocks are 100 ports wide and often adjacent — 200 in a row on the
+    // maintainer's machine, out of ~19 UDP and ~20 TCP ranges
+    // (`netsh interface ipv4 show excludedportrange protocol=tcp`).
+    //
+    // The old version asked ten times and released each socket immediately. Windows hands ephemeral
+    // ports out roughly sequentially, so once the allocator's cursor stood inside such a block every
+    // one of those ten draws came back from the same block and the whole RTSP start failed — an
+    // instant, self-repeating reconnect loop, and only on the H.264 path, since that is the only one
+    // that still needs go2rtc. Holding the sockets forces the cursor forward instead of letting it
+    // hand back the same number.
+    const ATTEMPTS: usize = 256;
+    let mut held = Vec::with_capacity(ATTEMPTS);
     let mut last = String::new();
-    for _ in 0..10 {
+    for _ in 0..ATTEMPTS {
         let udp = std::net::UdpSocket::bind(("127.0.0.1", 0))
             .map_err(|e| format!("Cannot allocate a WebRTC port: {e}"))?;
         let port = udp
@@ -609,10 +624,17 @@ fn free_loopback_webrtc_port() -> Result<u16, String> {
             .port();
         match std::net::TcpListener::bind(("127.0.0.1", port)) {
             Ok(_) => return Ok(port),
-            Err(e) => last = e.to_string(),
+            Err(e) => {
+                last = e.to_string();
+                held.push(udp);
+            }
         }
     }
-    Err(format!("Cannot find a port free for both UDP and TCP: {last}"))
+    Err(format!(
+        "Cannot find a port free for both UDP and TCP after {ATTEMPTS} attempts. \
+         On Windows this is usually a reserved port range — check \
+         `netsh interface ipv4 show excludedportrange protocol=tcp`. Last error: {last}"
+    ))
 }
 
 #[cfg(test)]
