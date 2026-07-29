@@ -103,8 +103,8 @@ Everything you'd expect from a ground station:
 - **Connections:** USB / serial, Bluetooth (SPP & BLE), TCP, UDP.
 - **Link modes:** live control link, **passive** listen-only telemetry, or a **relay** that
   re-broadcasts to other ground stations.
-- **Platforms:** Windows, macOS (universal, unsigned) and Linux (x86-64 / ARM64). Android is in
-  development for a release after 1.0.
+- **Platforms:** Windows, macOS (universal, unsigned) and Linux (x86-64 / ARM64). Android and iOS are
+  in development for a release after 1.0.
 
 ## Download
 
