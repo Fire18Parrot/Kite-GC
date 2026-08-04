@@ -182,12 +182,16 @@ fn classify_crsf_mode(text: &str) -> (bool, u32, FlightModeState) {
         _ => 0,
     };
     let primary = match text {
-        "ANGL" | "ANGH" | "AH" => "angle",
+        // "AH" = alt hold (self-levelled); "ANGH" = INAV's angle-hold MODE — not althold.
+        "ANGL" | "AH" => "angle",
+        "ANGH" => "anglehold",
         "HOR" => "horizon",
         "HOLD" | "LOTR" => "poshold",
         "CRUZ" | "CRSH" => "cruise",
         "WP" => "mission",
         "RTH" | "WRTH" => "rth",
+        "LAND" => "rth", // INAV FW autoland (RTH landing phase) — mirrors the LTM mode-15 mapping
+        "TURT" => "turtle",
         "MANU" => "manual",
         "!FS!" => "failsafe",
         "ACRO" | "OK" | "WAIT" | "!ERR" => "acro",
@@ -196,8 +200,11 @@ fn classify_crsf_mode(text: &str) -> (bool, u32, FlightModeState) {
         }
     };
     let mut modifiers = Vec::new();
-    if matches!(text, "ANGH" | "AH") {
+    if text == "AH" {
         modifiers.push("althold".to_string());
+    }
+    if text == "LAND" {
+        modifiers.push("autoland".to_string());
     }
     (armed, disable_bits, FlightModeState { primary: primary.to_string(), modifiers })
 }
