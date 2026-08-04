@@ -223,6 +223,11 @@ struct State {
     baro_alt: f64,
     vario: f64,
     seen_altitude: bool,
+    /// A BARO_ALT (0x09) frame has actually been decoded. Presence, not value: INAV only sends the
+    /// frame since 9.0 (with a baro), so on 8.x `baro_alt` would stay a placeholder 0.0 forever while
+    /// VARIO keeps triggering altitude events — issue #30. Publish falls back to the GPS altitude
+    /// until the first real baro frame; a genuine baro reading of 0.0 is left untouched.
+    seen_baro: bool,
 
     voltage: f64,
     current: f64,
@@ -372,6 +377,7 @@ impl CrsfDecoder {
             }
             Decoded::BaroAlt { alt_m, .. } => {
                 s.baro_alt = *alt_m;
+                s.seen_baro = true;
                 s.seen_altitude = true;
                 s.fresh_altitude = true;
             }
@@ -503,7 +509,13 @@ impl CrsfDecoder {
         }
 
         if f_alt {
-            let alt = AltitudeData { altitude: s.baro_alt, vario: s.vario };
+            // No baro frame ever decoded → the GPS frame's altitude is the only altitude this link
+            // carries (INAV ≤ 8.x never sends 0x09; see `seen_baro`). Same arming-relative reference
+            // as the baro value for INAV, so the consumers don't care which one fed it. When 0x09 IS
+            // present, behaviour is bit-identical to before — a link that sends the frame (Crossfire,
+            // mLRS, ELRS + INAV 9) cannot be affected by this fallback.
+            let alt_m = if s.seen_baro { s.baro_alt } else { s.gps_alt };
+            let alt = AltitudeData { altitude: alt_m, vario: s.vario };
             let _ = app.emit("telemetry-altitude", &alt);
             if let Some(rec) = recorder {
                 if let Ok(mut r) = rec.lock() { r.on_altitude(&alt); }
