@@ -6,6 +6,7 @@
 
 import { writable } from 'svelte/store';
 import type { RelayConfig } from '$lib/stores/relay';
+import { isMobile } from '$lib/platform';
 
 export interface MapState {
   center: [number, number];
@@ -430,7 +431,10 @@ const defaults: AppSettings = {
     right: ['flightMode', 'battery'],
   },
   locale: 'en',
-  uiScale: 1,
+  // A phone screen is physically small but pixel-dense, so chrome sized for a desktop window eats
+  // most of the map and the toolbar starts dropping controls. 75% is the first-run default there;
+  // it is an ordinary setting afterwards, so a saved preference always wins over this.
+  uiScale: isMobile ? 0.75 : 1,
   cesiumIonToken: '',
   cesiumKeyPromptDismissed: false,
   lowPower3D: 'auto',

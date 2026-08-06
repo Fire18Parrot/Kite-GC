@@ -17,20 +17,20 @@
          scroll-chain or bounce the whole frame (the per-panel scrollers handle their own overflow). */
       html, body { overscroll-behavior: none; }
 
-      /* Keep the UI clear of the system bars and the camera cutout. Held in landscape — how a GCS is
-         used — the cutout eats into the LEFT or RIGHT edge, exactly where the toolbar's brand and its
-         control cluster sit, so the horizontal insets matter more here than the vertical ones.
-         `--app-width` / `--app-height` are the usable box the app lays itself out in: `.ui-root` and
-         `.ui-scale` size against these instead of raw viewport units. Every value falls back to 0px,
-         so on desktop (and on any device without a cutout) they resolve to exactly 100vw × 100vh and
-         nothing about the existing layout changes. */
+      /* Distance from each screen edge that is unsafe to put controls in — on Android, the display
+         cutout (and the system bars, when they are shown; MainActivity hides them). Held in landscape
+         as a GCS is, the cutout eats into the LEFT or RIGHT edge, exactly where the toolbar's brand
+         and its control cluster sit, so the horizontal insets are the ones that matter here.
+
+         Only the chrome consumes these — the toolbar and the status bar pad their own contents. The
+         map deliberately does NOT: it runs full-bleed underneath, because a black bar down the camera
+         edge costs more than a few pixels of map hidden behind a hole. All four fall back to 0px, so
+         on desktop every rule that reads them is a no-op. */
       :root {
         --safe-top: env(safe-area-inset-top, 0px);
         --safe-right: env(safe-area-inset-right, 0px);
         --safe-bottom: env(safe-area-inset-bottom, 0px);
         --safe-left: env(safe-area-inset-left, 0px);
-        --app-width: calc(100vw - var(--safe-left) - var(--safe-right));
-        --app-height: calc(100vh - var(--safe-top) - var(--safe-bottom));
       }
 
       /* Touch: the long-press text selection and the blue tap flash are desktop-mouse idioms that only

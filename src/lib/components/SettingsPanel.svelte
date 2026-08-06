@@ -308,7 +308,12 @@
       </div>
       <div class="s-row">
         <label class="s-label" for="ui-scale">{$t('settings.uiScale')}</label>
+        <!-- Below 100% the chrome is laid out in MORE logical pixels and then shrunk, so widgets
+             cover less of the map and the toolbar fits more before it starts collapsing controls —
+             which is what a phone-sized screen needs. Android defaults to 75%. -->
         <select id="ui-scale" class="s-select" value={uiScale} onchange={handleUiScaleChange}>
+          <option value={0.75}>75%</option>
+          <option value={0.85}>85%</option>
           <option value={1}>100%</option>
           <option value={1.25}>125%</option>
           <option value={1.5}>150%</option>

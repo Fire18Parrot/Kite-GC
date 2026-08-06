@@ -2928,23 +2928,27 @@
      `.ui-root` fills the viewport. `.ui-scale` holds all chrome and is zoomed by
      --ui-scale (sized /scale so it fills exactly the viewport after the zoom).
      `.layer-map` holds the single Map/Map3D instance UNZOOMED so it stays crisp. */
-  /* Sized against the safe-area box rather than the raw viewport (see the `:root` block in app.html):
-     on Android the activity draws edge to edge, under the status bar and the camera cutout, and every
-     absolutely-positioned layer below is placed relative to this element — so insetting it here is
-     what keeps the whole UI clear of them. Resolves to exactly 100vw × 100vh everywhere else. */
+  /* Full-bleed on purpose, including under an Android display cutout: the map is the thing worth
+     giving every pixel to, and insetting this element would letterbox it behind a black bar down the
+     camera edge. The safe-area insets are applied to the *chrome* instead — the toolbar and the
+     status bar pad their own contents (see Toolbar.svelte / StatusBar.svelte), which is enough to
+     keep controls out from under the hole.
+
+     Note this must keep the same origin as `.ui-scale` below: the floating-window rect math maps
+     logical chrome coordinates to screen pixels by multiplying by `uiScale` alone, which only holds
+     while both layers start at 0,0. Offsetting either one silently shifts the in-frame map. */
   .ui-root {
     position: relative;
-    margin: var(--safe-top, 0px) var(--safe-right, 0px) var(--safe-bottom, 0px) var(--safe-left, 0px);
-    width: var(--app-width, 100vw);
-    height: var(--app-height, 100vh);
+    width: 100vw;
+    height: 100vh;
     overflow: hidden;
   }
   .ui-scale {
     position: absolute;
     top: 0;
     left: 0;
-    width: calc(var(--app-width, 100vw) / var(--ui-scale, 1));
-    height: calc(var(--app-height, 100vh) / var(--ui-scale, 1));
+    width: calc(100vw / var(--ui-scale, 1));
+    height: calc(100vh / var(--ui-scale, 1));
     /* Scale the chrome up to fill the viewport (the box is sized /scale above, then scaled back from
        the top-left corner). We use transform: scale() rather than `zoom` because WebKitGTK (Linux)
        does not support CSS `zoom` — it left the chrome at the /scale size, i.e. SMALLER than the

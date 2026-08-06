@@ -77,7 +77,9 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0 10px;
+    /* Horizontal padding absorbs the display-cutout inset too — see the same rule in Toolbar.svelte.
+       0px on desktop. */
+    padding: 0 calc(10px + var(--safe-right, 0px)) 0 calc(10px + var(--safe-left, 0px));
     height: 24px;
     background: #2e2e2e;
     border-top: 1px solid #272727;

@@ -410,7 +410,10 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0 16px;
+    /* The horizontal padding also absorbs the display-cutout inset, so the brand on one end and the
+       control cluster on the other stay clear of a punch-hole camera. The bar's background still runs
+       edge to edge behind it; only the contents move. 0px on desktop. */
+    padding: 0 calc(16px + var(--safe-right, 0px)) 0 calc(16px + var(--safe-left, 0px));
     height: 50px;
     background: #2e2e2e;
     border-bottom: 3px solid #37a8db;
