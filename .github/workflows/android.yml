@@ -39,6 +39,14 @@ on:
       - 'src/**'
       - '.github/workflows/android.yml'
 
+# One APK build per branch at a time. Besides not paying for two builds of the same branch, this is the
+# escape hatch when a run gets stuck: a run whose runner is reclaimed mid-build can be left wedged in
+# "in_progress" on GitHub's side, refusing both re-run ("already running") and cancel — and blocking
+# every later attempt. Starting a new run then clears it instead of needing a support ticket.
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   # Pinned rather than "latest": the NDK is the C toolchain the Rust cross-build links against, and an
