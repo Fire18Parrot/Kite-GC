@@ -312,6 +312,8 @@
              cover less of the map and the toolbar fits more before it starts collapsing controls —
              which is what a phone-sized screen needs. Android defaults to 75%. -->
         <select id="ui-scale" class="s-select" value={uiScale} onchange={handleUiScaleChange}>
+          <option value={0.5}>50%</option>
+          <option value={0.65}>65%</option>
           <option value={0.75}>75%</option>
           <option value={0.85}>85%</option>
           <option value={1}>100%</option>

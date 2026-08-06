@@ -70,6 +70,20 @@
     gap: 0;
     z-index: 100;
     transition: left 0.3s ease;
+    /* Bound the rail to the space between the toolbar and the status bar and let it scroll, instead
+       of overflowing and being silently clipped by `.ui-root`'s `overflow: hidden` — which is what
+       happens on a phone in landscape, where the last icons simply vanish off the bottom edge.
+       Expressed in the chrome's own logical pixels: `.ui-scale` is exactly `100vh / --ui-scale` tall,
+       so this stays correct at every UI scale without depending on which ancestor is the offset
+       parent. The scrollbar is hidden because the rail is a touch surface, not a document. */
+    max-height: calc(100vh / var(--ui-scale, 1) - 65px - 30px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: none;
+  }
+
+  .nav-rail::-webkit-scrollbar {
+    display: none;
   }
 
   .nav-rail.open {
