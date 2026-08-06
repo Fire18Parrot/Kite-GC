@@ -94,8 +94,28 @@ from the system dialog grants it up front, otherwise the first connect raises th
 
 The **Android** workflow in GitHub Actions builds the APK and uploads it as a run artifact — Actions →
 Android → *Run workflow*. That is the recommended route: the runner already has the SDK, the JDK and
-`sdkmanager`, so nothing has to be installed locally. The artifact is signed with Gradle's debug
-keystore, which is enough to sideload but not to publish.
+`sdkmanager`, so nothing has to be installed locally.
+
+#### Signing
+
+Release builds are signed with the **debug** keystore unless you supply a real one, because an APK
+with no signature at all cannot be installed — Android rejects it as an invalid package. That is
+enough to sideload, and not enough to publish.
+
+The debug keystore is generated per machine, so a build from CI and a build from your laptop have
+different signatures. Android will refuse to install one over the other; **uninstall the old copy
+first** when switching between them (or between two CI runs).
+
+To sign with a real key, drop a `key.properties` next to `gen/android/app/build.gradle.kts`:
+
+```properties
+storeFile=/absolute/path/to/keystore.jks
+storePassword=…
+keyAlias=…
+keyPassword=…
+```
+
+It is gitignored, so the key never lands in the repository.
 
 #### Building locally
 

@@ -137,12 +137,26 @@ jobs:
           fi
 
       # Path depends on the ABI flavour Gradle produced (arm64/universal/...), so collect whatever
-      # landed rather than hardcoding one name.
+      # landed rather than hardcoding one name. `*-unsigned.apk` is skipped explicitly: Gradle leaves
+      # the pre-signing intermediate behind, and it cannot be installed.
       - name: Collect APKs
         run: |
           mkdir -p dist-android
-          find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -exec cp {} dist-android/ \;
+          find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' \
+            -not -name '*-unsigned.apk' -exec cp {} dist-android/ \;
           ls -la dist-android
+          test -n "$(ls -A dist-android)" || { echo "::error::no signed APK was produced"; exit 1; }
+
+      # An unsigned APK installs nowhere — Android rejects it as an invalid package, and the only clue
+      # is a filename ending in `-unsigned`. Catch that here rather than on someone's phone.
+      - name: Verify the APKs are signed
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          test -x "$APKSIGNER" || { echo "::error::apksigner not found in the SDK"; exit 1; }
+          for apk in dist-android/*.apk; do
+            echo "== $apk"
+            "$APKSIGNER" verify --verbose "$apk"
+          done
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
