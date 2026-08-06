@@ -5,8 +5,9 @@
 //! telemetry out a *second* link. Phase 1 = serial (covers HC-05 / BT-SPP virtual COM, e.g. U360GTS);
 //! BLE / TCP-server / UDP follow in Phase 2.
 
-// The serial and BLE sinks follow their inbound counterparts in `transport/`: no Android backend, so
-// the mobile build gets a stand-in of the same shape (see `transport/mod.rs`). TCP/UDP are unchanged.
+// The serial and BLE sinks follow their inbound counterparts in `transport/` (see `transport/mod.rs`):
+// on Android the serial sink writes through the USB Host API instead of `serialport`, and the BLE sink
+// is a stand-in that cannot open. TCP/UDP are unchanged.
 #[cfg(not(target_os = "android"))]
 pub mod ble;
 #[cfg(target_os = "android")]

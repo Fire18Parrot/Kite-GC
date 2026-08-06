@@ -72,11 +72,23 @@ Developer account, credentials read from your environment / keychain — never c
 
 ### Android
 
-Android is **experimental**. The app builds and installs, and connects over **UDP / TCP** — which
-covers a WiFi telemetry bridge, an ESP32 link, or another Kite instance relaying to you. USB serial
-and Bluetooth LE are **not implemented** on Android yet (see
+Android is **experimental**. The app builds and installs, and connects over **USB serial** (OTG) or
+**UDP / TCP**. Bluetooth LE is **not implemented** there yet (see
 [What does not work yet](#what-does-not-work-yet-on-android)), and the interface is still the desktop
 one: it fits a tablet in landscape, and is cramped on a phone.
+
+USB serial goes through the Android USB Host API, so the driver lives in Kotlin
+(`gen/android/app/src/main/java/com/kitegc/app/UsbSerial.kt`) with a JNI shim in front of it
+(`src-tauri/src/transport/serial_android.rs`). Two device families are driven:
+
+| Family | Covers |
+| --- | --- |
+| **CDC-ACM** | INAV / Betaflight / ArduPilot flight controllers over USB, ESP32-S2/S3/C3 native USB |
+| **CP210x** | Silicon Labs bridges — most SiK telemetry radios |
+
+FTDI (RFD900) and CH340 are **not** driven yet; both slot in as another `SerialDriver` in that Kotlin
+file. Android grants USB access per device and per session: plugging the cable in and picking Kite
+from the system dialog grants it up front, otherwise the first connect raises the permission prompt.
 
 #### Getting an APK without building one
 
@@ -114,10 +126,11 @@ cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android 
 
 | Feature | State | Why |
 | --- | --- | --- |
-| UDP / TCP links | ✅ works | Plain sockets — the supported way to connect from Android. |
+| UDP / TCP links | ✅ works | Plain sockets. |
+| USB serial (CDC-ACM, CP210x) | ✅ works | Android USB Host API, driver in `UsbSerial.kt`. Needs an OTG cable. |
+| USB serial (FTDI, CH340) | ❌ not implemented | Those two chips need their own driver; the devices are not listed as ports. |
 | Flight log, missions, fleet & battery manager | ✅ works | SQLite in app-private storage (`android::app_data_dir`). |
 | Maps, terrain, weather | ✅ works | Network + the same tile cache as desktop. |
-| USB serial | ❌ not implemented | Needs the Android USB Host API driven from Kotlin; the `serialport` crate has no Android backend. The port list is simply empty. |
 | Bluetooth LE | ❌ not implemented | `btleplug`'s Android backend needs a companion Java library the Gradle project does not ship. A scan finds nothing. |
 | Joystick / HID RC control | ❌ not implemented | The backend is per-OS (WGI / evdev / IOKit); Android has none, so no device is ever listed. |
 | Native video capture, RTSP via go2rtc | ❌ not implemented | Both shell out to bundled `ffmpeg` / `go2rtc` binaries, which an Android app cannot spawn. |

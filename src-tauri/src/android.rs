@@ -15,6 +15,8 @@
 //! one answer available from the first line of `run()` onwards, and `log_resolved_dirs()` cross-checks
 //! it against Tauri's own answer once the app is up.
 
+pub mod jvm;
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 

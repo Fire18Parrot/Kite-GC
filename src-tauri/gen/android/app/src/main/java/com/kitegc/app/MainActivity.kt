@@ -11,6 +11,11 @@ class MainActivity : TauriActivity() {
   private var lastBackPress = 0L
 
   override fun onCreate(savedInstanceState: Bundle?) {
+    // Before super.onCreate, which is what starts Tauri and therefore the Rust side: the USB-serial
+    // bridge has no Context of its own and the first port enumeration can arrive as soon as the
+    // frontend is up.
+    UsbSerial.init(this)
+
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
 

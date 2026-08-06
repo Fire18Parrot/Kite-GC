@@ -23,10 +23,12 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
-    <!-- USB serial and BLE are declared but NOT yet implemented on Android (see
-         `transport/serial_android.rs` and `transport/ble_android.rs`); the permissions are here so the
-         manifest matches the intended feature set and the USB-attach intent filter below can be added
-         with the plugin rather than in a second migration. Neither is requested at runtime today.
+    <!-- USB serial needs no <uses-permission>: access is granted per device at runtime, either by the
+         system dialog UsbSerial.open() raises or by the user picking Kite from the attach dialog that
+         the intent filter below produces.
+
+         BLE is declared but NOT yet implemented (see `transport/ble_android.rs`) and is not requested
+         at runtime today; the entries are here so the manifest matches the intended feature set.
          BLUETOOTH_SCAN carries neverForLocation because a BLE-serial adapter is a link, not a
          positioning source — without it Android 12+ would force the location grant on the user too. -->
     <uses-permission
@@ -65,6 +67,16 @@
                 <!-- AndroidTV support -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+
+            <!-- Offer Kite when a USB-serial device is plugged in. Choosing it here grants the USB
+                 permission for that device, so the in-app prompt never appears. `device_filter.xml`
+                 lists exactly what UsbSerial.kt can actually drive. -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
         </activity>
 
         <provider

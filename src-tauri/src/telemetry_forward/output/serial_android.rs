@@ -1,32 +1,40 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 
-//! Serial relay sink — **Android stand-in** for `output/serial.rs`.
+//! Serial relay sink — Android build.
 //!
-//! Same reason as `transport/serial_android.rs`: the `serialport` crate has no Android backend and is
-//! not in the mobile dependency set. The relay's TCP and UDP sinks are unaffected and remain the way
-//! to feed an antenna tracker or a second GCS from Android.
+//! Same job as `output/serial.rs`, but reached through the USB Host API rather than the `serialport`
+//! crate, which has no Android backend. It simply writes through the Android [`SerialConnection`]
+//! (`transport/serial_android.rs`), which already owns the JNI shim and the device handle — the Kotlin
+//! bridge keys everything by handle, so a relay port and the telemetry link can be open at once.
+//!
+//! Practical note: this needs a *second* USB device, which on a phone means a powered OTG hub. On a
+//! tablet with a single USB-C port the TCP or UDP relay output is usually the workable choice.
 
 use super::OutputSink;
+use crate::transport::serial::SerialConnection;
+use crate::transport::ByteTransport;
 
 pub struct SerialSink {
-    _never: std::convert::Infallible,
+    transport: SerialConnection,
 }
 
 impl SerialSink {
     pub fn open(port_name: &str, baud_rate: u32) -> Result<Self, String> {
-        log::warn!("Relay serial sink refused on Android: {port_name} @ {baud_rate} baud");
-        Err("Serial relay output is not available on Android — use the UDP or TCP relay instead"
-            .to_string())
+        let transport = SerialConnection::open(port_name, baud_rate)
+            .map_err(|e| format!("Failed to open relay port {port_name}: {e}"))?;
+        Ok(Self { transport })
     }
 }
 
 impl OutputSink for SerialSink {
-    fn write(&mut self, _data: &[u8]) -> Result<(), String> {
-        Err("Serial relay output is not available on Android".to_string())
+    fn write(&mut self, data: &[u8]) -> Result<(), String> {
+        self.transport
+            .write_bytes(data)
+            .map_err(|e| format!("Relay serial write failed: {e}"))
     }
 
     fn description(&self) -> String {
-        "Serial(unavailable on Android)".to_string()
+        self.transport.description()
     }
 }

@@ -104,8 +104,8 @@ Everything you'd expect from a ground station:
 - **Link modes:** live control link, **passive** listen-only telemetry, or a **relay** that
   re-broadcasts to other ground stations.
 - **Platforms:** Windows, macOS (universal, unsigned) and Linux (x86-64 / ARM64). **Android is
-  experimental** — it builds, installs and flies over UDP/TCP, but USB serial and BLE are not wired up
-  there yet and the interface is still the desktop one (tablet-sized, landscape). See the
+  experimental** — it builds, installs and flies over USB serial (OTG) or UDP/TCP, but BLE is not
+  wired up there yet and the interface is still the desktop one (tablet-sized, landscape). See the
   [Build Guide](https://b14ckyy.github.io/Kite-GC/for-developers/building/#android) for what works.
   iOS is not started.
 
