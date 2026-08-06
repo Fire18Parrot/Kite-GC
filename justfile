@@ -52,6 +52,15 @@ build-macos:
 notarize-macos:
     @bash scripts/notarize-macos.sh
 
+# Android APK, arm64 (EXPERIMENTAL — needs ANDROID_HOME + NDK_HOME; see the Build Guide).
+# Prefer the "Android" GitHub Actions workflow, which needs nothing installed locally.
+build-android:
+    npm run tauri android build -- --apk --target aarch64
+
+# Android dev build on a connected device / emulator, with hot reload
+dev-android:
+    npm run tauri android dev
+
 # =============================================================================
 # Quality Checks
 # =============================================================================
@@ -71,6 +80,12 @@ check:
     npm run check
     @echo '→ Running cargo check...'
     cargo check --manifest-path src-tauri/Cargo.toml --quiet
+
+# Type-check the Rust backend for Android without a full Gradle build. Catches cfg mistakes in the
+# mobile stand-ins (transport/serial_android.rs, transport/ble_android.rs) in seconds.
+# Needs: rustup target add aarch64-linux-android — plus an NDK on PATH for the C dependencies.
+check-android:
+    cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android --lib
 
 # Frontend check in watch mode
 check-watch:

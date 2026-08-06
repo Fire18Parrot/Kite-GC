@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 
 mod aero;
+#[cfg(target_os = "android")]
+mod android;
 mod child_env;
 mod commands;
 mod debug_mode;
@@ -336,6 +338,8 @@ pub fn run() {
     let log_level = if debug_flag { log::LevelFilter::Debug } else { log::LevelFilter::Warn };
     logging::init(log_level, is_portable());
 
+    // `mut` because the desktop builds add the window-state plugin below; Android has no such plugin.
+    #[cfg_attr(target_os = "android", allow(unused_mut))]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init());
@@ -344,6 +348,9 @@ pub fn run() {
     // The plugin saves to the OS app-config dir, which portable mode cannot redirect on
     // Windows (Known-Folder API, not env-driven) — so only enable it in installed mode.
     // Portable builds trade window-geometry persistence for a clean, system-path-free runtime.
+    // Desktop only: Android has a single full-screen activity, so there is no geometry to restore
+    // and the plugin is not part of the mobile dependency set (see Cargo.toml).
+    #[cfg(not(target_os = "android"))]
     if !is_portable() {
         use tauri_plugin_window_state::StateFlags;
         // Persist everything EXCEPT the decorations flag: we run with a custom titlebar
@@ -358,6 +365,11 @@ pub fn run() {
 
     builder
         .setup(|_app| {
+            // Android: record where app data actually landed, and flag any disagreement with Tauri's
+            // own idea of it (see `android::log_resolved_dirs`).
+            #[cfg(target_os = "android")]
+            android::log_resolved_dirs(_app.handle());
+
             // Linux/WebKitGTK: stop trackpad/keyboard gestures from zooming the whole WebView frame.
             // WebKitGTK handles these natively in GTK and ignores any JS `preventDefault`, so they can
             // only be suppressed here (Windows/WebView2 + macOS use the JS guard in `+layout.svelte`).

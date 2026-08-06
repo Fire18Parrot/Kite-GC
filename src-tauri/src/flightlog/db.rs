@@ -155,8 +155,15 @@ pub fn resolve_db_path(custom_path: &str, portable: bool) -> PathBuf {
                 .join("flights.db");
         }
     }
+    // Android: app-private storage. Not a fallback — the working directory of an Android process is
+    // `/`, so the generic branch below would try to create the database on a read-only filesystem.
+    #[cfg(target_os = "android")]
+    {
+        return crate::android::app_data_dir().join("flights.db");
+    }
 
     // Fallback: current directory
+    #[allow(unreachable_code)]
     PathBuf::from("flights.db")
 }
 
@@ -178,8 +185,16 @@ pub fn resolve_raw_log_dir(custom_path: &str, portable: bool) -> PathBuf {
         }
     }
 
+    // Android has no path-addressable Documents folder (scoped storage makes it a MediaStore
+    // collection), so raw logs go to app-private storage and are shared out explicitly instead.
+    #[cfg(target_os = "android")]
+    {
+        return crate::android::app_documents_dir().join("KiteGC");
+    }
+
     // Default: the user's Documents folder → Documents/KiteGC (Windows honours OneDrive relocation,
     // Linux uses XDG_DOCUMENTS_DIR). Falls back to ~/Documents, then the current dir.
+    #[allow(unreachable_code)]
     if let Some(docs) = dirs::document_dir() {
         return docs.join("KiteGC");
     }

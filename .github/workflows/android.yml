@@ -1,0 +1,134 @@
+# Kite Ground Control - Android APK
+#
+# Builds the Android app and uploads the APK as a workflow artifact. Run it from the Actions tab
+# ("Run workflow"), or let it run automatically when something that affects the mobile build changes.
+#
+# There is no signing key here: the APK is signed with the debug keystore Gradle generates, which is
+# enough to sideload but NOT for the Play Store. Installing it means allowing "install unknown apps"
+# for whatever app you download it with.
+#
+# Why CI and not a local build: the Android SDK + NDK are ~6 GB, and the runner image already has the
+# SDK, the JDK and `sdkmanager` installed. `cargo tauri android build` drives Gradle, which
+# cross-compiles the Rust lib into `jniLibs/` and packages it — so the whole thing is one command once
+# the toolchain is in place.
+name: Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: 'Target ABI'
+        required: false
+        default: 'aarch64'
+        type: choice
+        options: [aarch64, armv7, i686, x86_64, all]
+  push:
+    branches: [master, main, development]
+    paths:
+      - 'src-tauri/**'
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/android.yml'
+  pull_request:
+    branches: [master, main, development]
+    paths:
+      - 'src-tauri/**'
+      - 'src/**'
+      - '.github/workflows/android.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned rather than "latest": the NDK is the C toolchain the Rust cross-build links against, and an
+  # NDK bump is exactly the kind of change that should be a visible commit rather than a silent
+  # difference between two runs of the same workflow. r27 is the current LTS.
+  NDK_VERSION: '27.2.12479018'
+
+jobs:
+  apk:
+    name: Build APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # --- Android toolchain ---
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK ${{ env.NDK_VERSION }}
+        run: sdkmanager --install "ndk;${{ env.NDK_VERSION }}"
+
+      # `cargo tauri android build` reads NDK_HOME; the Gradle Rust plugin resolves the per-ABI
+      # toolchain (clang, ar, the sysroot) underneath it.
+      - name: Export NDK_HOME
+        run: echo "NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+
+      # --- Frontend ---
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # --- Rust ---
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # One target per ABI. The full set is what the "all" input builds; a single arm64 APK covers
+      # every Android phone and tablet made in the last decade and is the default for that reason.
+      - name: Add Rust Android targets
+        run: |
+          if [ "${{ inputs.arch }}" = "all" ]; then
+            rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+          else
+            rustup target add aarch64-linux-android
+          fi
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: android
+
+      # Type-checks the crate for Android before the much slower Gradle build, so a cfg mistake in the
+      # mobile stand-ins (transport/serial_android.rs, transport/ble_android.rs, commands/system.rs)
+      # fails in a minute with a readable error instead of inside a Gradle task log.
+      - name: Check the crate for the Android target
+        working-directory: src-tauri
+        run: cargo check --target aarch64-linux-android --lib
+
+      # --- Build ---
+      # "all" means every ABI, which is what omitting --target does; anything else is a single ABI.
+      - name: Build APK
+        run: |
+          if [ "${{ inputs.arch }}" = "all" ]; then
+            npm run tauri android build -- --apk
+          else
+            npm run tauri android build -- --apk --target "${{ inputs.arch || 'aarch64' }}"
+          fi
+
+      # Path depends on the ABI flavour Gradle produced (arm64/universal/...), so collect whatever
+      # landed rather than hardcoding one name.
+      - name: Collect APKs
+        run: |
+          mkdir -p dist-android
+          find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -exec cp {} dist-android/ \;
+          ls -la dist-android
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: kite-gc-android-${{ inputs.arch || 'aarch64' }}
+          path: dist-android/*.apk
+          if-no-files-found: error

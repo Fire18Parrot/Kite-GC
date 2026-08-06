@@ -9,6 +9,15 @@
 
 const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
 
+/** True in the Android WebView. Tested BEFORE the Linux check because Android's user-agent contains
+ *  "Linux" too ("Mozilla/5.0 (Linux; Android 13; …)") — the Linux flag below excludes it explicitly.
+ *
+ *  Gates everything that assumes a desktop window: the custom title bar's minimize/maximize/close
+ *  buttons and the edge resize grips both call Tauri window APIs that have no meaning in a
+ *  single-activity Android app. It also drives the safe-area insets — the activity draws edge to edge,
+ *  under the status bar and (in landscape, which is how a GCS is held) the camera cutout. */
+export const isAndroid = /Android/i.test(ua);
+
 /** True when running inside the macOS WebView (WKWebView) — used to mirror native window-control placement. */
 export const isMacOS = /Macintosh|Mac OS X/i.test(ua);
 
@@ -41,3 +50,10 @@ export const isWebKitGtk = isLinux;
  *  what silently pushed Linux back onto the `<img>` sink. The identical bytes under another content
  *  type stream perfectly. WebView2 reads multipart directly and is deliberately left untouched. */
 export const isWebKit = isLinux || isMacOS;
+
+/** True where the app runs in an OS-managed full-screen surface rather than a window it controls.
+ *
+ *  Android is the only such platform today, but the flag is named for the property the UI actually
+ *  cares about — "there is no window chrome to draw" — so an iOS build would set it too without every
+ *  call site having to grow a second condition. */
+export const isMobile = isAndroid;

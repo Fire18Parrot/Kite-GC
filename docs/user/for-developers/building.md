@@ -71,8 +71,60 @@ notarize-macos` signs + notarizes it for distribution without a Gatekeeper promp
 Developer account, credentials read from your environment / keychain — never committed).
 
 ### Android
-Android support (Tauri Mobile) was experimented with but is **on hold** — it needs a separate UI and
-build pipeline. Don't run `tauri android init`; it isn't supported right now.
+
+Android is **experimental**. The app builds and installs, and connects over **UDP / TCP** — which
+covers a WiFi telemetry bridge, an ESP32 link, or another Kite instance relaying to you. USB serial
+and Bluetooth LE are **not implemented** on Android yet (see
+[What does not work yet](#what-does-not-work-yet-on-android)), and the interface is still the desktop
+one: it fits a tablet in landscape, and is cramped on a phone.
+
+#### Getting an APK without building one
+
+The **Android** workflow in GitHub Actions builds the APK and uploads it as a run artifact — Actions →
+Android → *Run workflow*. That is the recommended route: the runner already has the SDK, the JDK and
+`sdkmanager`, so nothing has to be installed locally. The artifact is signed with Gradle's debug
+keystore, which is enough to sideload but not to publish.
+
+#### Building locally
+
+1. **JDK 17** — `sudo apt install openjdk-17-jdk` (or Temurin on Windows/macOS).
+2. **Android SDK** — Android Studio, or just the command-line tools. Set `ANDROID_HOME`.
+3. **NDK r27** — `sdkmanager --install "ndk;27.2.12479018"`, then point `NDK_HOME` at it.
+4. **Rust targets** — `rustup target add aarch64-linux-android` (add `armv7-linux-androideabi`,
+   `i686-linux-android`, `x86_64-linux-android` only if you need those ABIs; arm64 covers every
+   Android phone and tablet made in the last decade).
+
+```bash
+npm ci
+npm run tauri android build -- --apk --target aarch64   # APK in src-tauri/gen/android/app/build/outputs/apk
+npm run tauri android dev                               # on-device dev build with hot reload
+```
+
+`src-tauri/gen/android` is **committed** — it is the Android app project (manifest, Gradle build,
+icons, the Rust Gradle plugin), edited by hand. Do **not** run `tauri android init`: it would
+regenerate the project and overwrite the manifest's permissions and the landscape orientation.
+
+To type-check the Rust side for Android without a full Gradle build:
+
+```bash
+cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android --lib
+```
+
+#### What does not work yet on Android
+
+| Feature | State | Why |
+| --- | --- | --- |
+| UDP / TCP links | ✅ works | Plain sockets — the supported way to connect from Android. |
+| Flight log, missions, fleet & battery manager | ✅ works | SQLite in app-private storage (`android::app_data_dir`). |
+| Maps, terrain, weather | ✅ works | Network + the same tile cache as desktop. |
+| USB serial | ❌ not implemented | Needs the Android USB Host API driven from Kotlin; the `serialport` crate has no Android backend. The port list is simply empty. |
+| Bluetooth LE | ❌ not implemented | `btleplug`'s Android backend needs a companion Java library the Gradle project does not ship. A scan finds nothing. |
+| Joystick / HID RC control | ❌ not implemented | The backend is per-OS (WGI / evdev / IOKit); Android has none, so no device is ever listed. |
+| Native video capture, RTSP via go2rtc | ❌ not implemented | Both shell out to bundled `ffmpeg` / `go2rtc` binaries, which an Android app cannot spawn. |
+| Exports to `Documents/` | ⚠️ different | Scoped storage makes Documents a MediaStore collection, not a path — exports go to app-private storage instead. |
+
+Where a feature is missing the backend returns a clear message rather than failing to build, so the
+rest of the app is unaffected.
 
 ## Workflow
 

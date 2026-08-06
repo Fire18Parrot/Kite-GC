@@ -33,6 +33,7 @@
   import Toolbar from "$lib/components/Toolbar.svelte";
   import RelayPanel from "$lib/components/RelayPanel.svelte";
   import WindowResizeBorders from "$lib/components/WindowResizeBorders.svelte";
+  import { isMobile } from "$lib/platform";
   import StatusBar from "$lib/components/StatusBar.svelte";
   import "$lib/stores/rcSession"; // global RC session (keeps engage alive across navigation; involuntary-loss guard)
   import NavRail from "$lib/components/NavRail.svelte";
@@ -2440,8 +2441,11 @@
 
 <div class="ui-root" style:--ui-scale={uiScale}>
   <!-- Window resize grips — outside `.ui-scale` so position:fixed stays viewport-relative.
-       Re-adds edge resizing lost when the native decorations are disabled. -->
-  <WindowResizeBorders />
+       Re-adds edge resizing lost when the native decorations are disabled. Desktop only: the app
+       fills the screen on Android and `startResizeDragging` has nothing to resize there. -->
+  {#if !isMobile}
+    <WindowResizeBorders />
+  {/if}
 
   <!-- ======= MAP LAYER — unzoomed / native resolution (see docs/archive/UI_SCALING.md) =======
        The map must stay crisp, so it lives OUTSIDE the zoomed `.ui-scale` layer. It is the
@@ -2924,18 +2928,23 @@
      `.ui-root` fills the viewport. `.ui-scale` holds all chrome and is zoomed by
      --ui-scale (sized /scale so it fills exactly the viewport after the zoom).
      `.layer-map` holds the single Map/Map3D instance UNZOOMED so it stays crisp. */
+  /* Sized against the safe-area box rather than the raw viewport (see the `:root` block in app.html):
+     on Android the activity draws edge to edge, under the status bar and the camera cutout, and every
+     absolutely-positioned layer below is placed relative to this element — so insetting it here is
+     what keeps the whole UI clear of them. Resolves to exactly 100vw × 100vh everywhere else. */
   .ui-root {
     position: relative;
-    width: 100vw;
-    height: 100vh;
+    margin: var(--safe-top, 0px) var(--safe-right, 0px) var(--safe-bottom, 0px) var(--safe-left, 0px);
+    width: var(--app-width, 100vw);
+    height: var(--app-height, 100vh);
     overflow: hidden;
   }
   .ui-scale {
     position: absolute;
     top: 0;
     left: 0;
-    width: calc(100vw / var(--ui-scale, 1));
-    height: calc(100vh / var(--ui-scale, 1));
+    width: calc(var(--app-width, 100vw) / var(--ui-scale, 1));
+    height: calc(var(--app-height, 100vh) / var(--ui-scale, 1));
     /* Scale the chrome up to fill the viewport (the box is sized /scale above, then scaled back from
        the top-left corner). We use transform: scale() rather than `zoom` because WebKitGTK (Linux)
        does not support CSS `zoom` — it left the chrome at the /scale size, i.e. SMALLER than the

@@ -28,11 +28,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-window-state = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_repr = "0.1"
-serialport = "4"
 log = "0.4"
 rusqlite = { version = "0.31", features = ["bundled"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "http2"], default-features = false }
@@ -43,7 +41,6 @@ csv = "1.3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = "0.4"        # extract blackbox_decode from the Linux/macOS .tar.zst release assets
 zstd = "0.13"      # decompress those .tar.zst assets (C-backed, like rusqlite's bundled SQLite)
-btleplug = "0.11"
 uuid = { version = "1", features = ["serde"] }
 dirs = "5"
 tokio = { version = "1", features = ["time", "sync", "macros"] }
@@ -51,7 +48,23 @@ futures = "0.3"
 mavlink = { version = "0.17", default-features = false, features = ["std", "ardupilotmega", "emit-extensions"] }
 num-traits = "0.2"  # FromPrimitive for lossless MavCmd/MavFrame <-> int (mission codec round-trip)
 tiff = "0.9"  # decode Copernicus GLO-30 GeoTIFF DEM tiles (Float32, DEFLATE, predictor 3)
+
+# ── Desktop-only dependencies ────────────────────────────────────────────────
+# Everything here is Windows/macOS/Linux-only and does not build for Android
+# (`target_os = "android"`), so the mobile target gets a stub instead — see the
+# `serial_android` / `ble_android` modules and `commands/system.rs`:
+#   serialport                — no Android backend; USB serial there goes through the
+#                               Android USB Host API (a Kotlin/JNI plugin, not this crate).
+#   btleplug                  — its Android backend needs a companion Java library
+#                               (droidplug) that the Gradle project does not ship.
+#   starship-battery          — "Support for this target OS is not implemented yet!"
+#   tauri-plugin-window-state — persists desktop window geometry; there are no windows to
+#                               persist on Android.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+serialport = "4"
+btleplug = "0.11"
 starship-battery = "0.10"  # cross-platform AC/battery state (Windows + Linux + macOS) for the low-power 3D auto mode
+tauri-plugin-window-state = "2"
 
 # HID / joystick input for GCS RC control (docs/archive/MSP_RC_CONTROL.md). Native per-OS backends read
 # RAW axes/buttons/hats (no gamepad projection) so flight hardware / RC transmitters map correctly:

@@ -8,10 +8,24 @@
 // 1. ByteTransport — protocol-agnostic byte-level I/O (read/write/close)
 // 2. Protocol layers (MspTransport, MavlinkHandler) — built on top of ByteTransport
 
+// Serial and BLE are the two transports whose desktop backends (`serialport`, `btleplug`) have no
+// Android build. Both are swapped for a stand-in of the same shape there, so everything downstream —
+// `ByteTransport`, the connection commands, the radar sources, the relay sinks — stays
+// platform-agnostic. TCP and UDP work as-is on Android and are the supported mobile links.
+#[cfg(not(target_os = "android"))]
 pub mod serial;
+#[cfg(target_os = "android")]
+#[path = "serial_android.rs"]
+pub mod serial;
+
+#[cfg(not(target_os = "android"))]
+pub mod ble;
+#[cfg(target_os = "android")]
+#[path = "ble_android.rs"]
+pub mod ble;
+
 pub mod tcp;
 pub mod udp;
-pub mod ble;
 
 use std::fmt;
 

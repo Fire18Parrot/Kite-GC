@@ -9,7 +9,7 @@
   import Button from '$lib/components/panel/Button.svelte';
   import SegmentedToggle from '$lib/components/panel/SegmentedToggle.svelte';
   import WindowControls from '$lib/components/WindowControls.svelte';
-  import { isMacOS } from '$lib/platform';
+  import { isMacOS, isLinux, isMobile } from '$lib/platform';
   import ConnectionStatusBox from '$lib/components/ConnectionStatusBox.svelte';
   import ArmingIndicator from '$lib/components/ArmingIndicator.svelte';
   import BatteryIndicator from '$lib/components/BatteryIndicator.svelte';
@@ -224,7 +224,9 @@
 
   // Double-click the title bar to maximize/restore. Windows/macOS drag regions already do this
   // natively, so only Linux/GTK needs the manual handler (otherwise it would toggle twice).
-  const isLinux = typeof navigator !== 'undefined' && navigator.userAgent.includes('Linux');
+  // `isLinux` comes from $lib/platform rather than a local user-agent test because Android's
+  // user-agent also contains "Linux" — a local test would arm this handler on a device that has no
+  // window to maximize, and a stray double-tap would throw from the Tauri window API.
   function onTitlebarDblClick(e: MouseEvent) {
     if (!isLinux) return;
     // Ignore double-clicks that land on interactive controls (buttons, selects, the window buttons).
@@ -235,7 +237,7 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <header class="toolbar" bind:this={headerEl} data-tauri-drag-region ondblclick={onTitlebarDblClick}>
-  {#if isMacOS}
+  {#if isMacOS && !isMobile}
     <!-- macOS: window controls live at top-left (native traffic-light placement). -->
     <WindowControls />
   {/if}
@@ -389,7 +391,9 @@
     >
       ⇅ {$t('relay.short')}
     </button>
-    {#if !isMacOS}
+    <!-- Not on mobile: an Android activity has no minimize / maximize / close, and the component's
+         mount effect would call the Tauri window API for a window that does not exist. -->
+    {#if !isMacOS && !isMobile}
       <WindowControls />
     {/if}
   </div>
