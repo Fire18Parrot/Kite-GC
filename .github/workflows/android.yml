@@ -23,7 +23,9 @@ on:
         type: choice
         options: [aarch64, armv7, i686, x86_64, all]
   push:
-    branches: [master, main, development]
+    # TEMPORARY: `claude/**` is here only to get a first APK build off the feature branch, because
+    # workflow_dispatch can only be triggered from the default branch. Remove once this has landed.
+    branches: [master, main, development, 'claude/**']
     paths:
       - 'src-tauri/**'
       - 'src/**'
