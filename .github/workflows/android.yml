@@ -68,10 +68,26 @@ jobs:
       - name: Install NDK ${{ env.NDK_VERSION }}
         run: sdkmanager --install "ndk;${{ env.NDK_VERSION }}"
 
-      # `cargo tauri android build` reads NDK_HOME; the Gradle Rust plugin resolves the per-ABI
-      # toolchain (clang, ar, the sysroot) underneath it.
-      - name: Export NDK_HOME
-        run: echo "NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+      # `cargo tauri android build` only needs NDK_HOME — it derives the per-ABI toolchain itself.
+      # A bare `cargo check --target aarch64-linux-android` does not: `cc-rs` shells out to
+      # `aarch64-linux-android-clang` on PATH, and the NDK ships no such name. Its compilers are
+      # API-versioned (`aarch64-linux-android24-clang`, matching `minSdk = 24` in app/build.gradle.kts)
+      # and live in a directory that is not on PATH, so the C dependencies (ring, rusqlite's bundled
+      # SQLite, zstd) fail to configure. Point cc-rs and the linker at them explicitly.
+      - name: Export the Android toolchain
+        run: |
+          NDK="$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$BIN/aarch64-linux-android24-clang" || {
+            echo "::error::NDK toolchain not found at $BIN"; ls -la "$BIN" || true; exit 1;
+          }
+          {
+            echo "NDK_HOME=$NDK"
+            echo "CC_aarch64_linux_android=$BIN/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$BIN/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/aarch64-linux-android24-clang"
+          } >> "$GITHUB_ENV"
+          echo "$BIN" >> "$GITHUB_PATH"
 
       # --- Frontend ---
       - name: Setup Node.js

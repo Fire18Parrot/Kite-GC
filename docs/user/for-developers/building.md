@@ -116,11 +116,21 @@ npm run tauri android dev                               # on-device dev build wi
 icons, the Rust Gradle plugin), edited by hand. Do **not** run `tauri android init`: it would
 regenerate the project and overwrite the manifest's permissions and the landscape orientation.
 
-To type-check the Rust side for Android without a full Gradle build:
+To type-check the Rust side for Android without a full Gradle build, use `just check-android`, or by
+hand:
 
 ```bash
+BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+export CC_aarch64_linux_android="$BIN/aarch64-linux-android24-clang"
+export AR_aarch64_linux_android="$BIN/llvm-ar"
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
 cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android --lib
 ```
+
+Those variables are not optional: `cc-rs` looks for an `aarch64-linux-android-clang` that the NDK does
+not ship — its compilers are API-versioned (`…android24-clang`, matching `minSdk`) — so without them
+the C dependencies (`ring`, bundled SQLite, `zstd`) fail to configure. `tauri android build` sets this
+up itself, so only the bare `cargo check` needs it.
 
 #### What does not work yet on Android
 
