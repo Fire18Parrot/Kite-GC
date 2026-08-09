@@ -613,7 +613,7 @@
       "radio": "无线电联系人"
     },
     "alert": {
-      "level": "级别",
+      "level": "同高",
       "cpaShort": "CPA",
       "cautionTitle": "交通接近",
       "cautionHint": "保持位置或增加距离",
@@ -1080,7 +1080,7 @@
     "bat": "电池",
     "home": "家",
     "thr": "油门",
-    "acc": "精度",
+    "acc": "加速",
     "auto": "自动",
     "na": "N/A"
   },
