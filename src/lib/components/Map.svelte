@@ -1089,7 +1089,7 @@
     if (!map || !$settings.airspace.enabled) return;
     if (get(editMode) || get(arduEditMode)) return; // editing waypoints (INAV or Ardu/PX4) → don't pop the airspace list
     if (activeSurveyPattern.isActive) return; // the survey pattern generator owns map clicks
-    if (get(guidedActive)) return; // Guided "fly here" owns the click → don't also pop the airspace list
+    if (guidedClickArmed()) return; // Guided "fly here" owns the click → don't also pop the airspace list
     // Toggle: if the list popup is already open, a second map click just dismisses it.
     if (aeroPopup && aeroPopup.isOpen()) {
       map.closePopup(aeroPopup);
@@ -1127,13 +1127,25 @@
   let guidedPopup: L.Popup | undefined;
   let guidedForm: ReturnType<typeof mount> | undefined;
 
+  /** Fly-Here click is armed when the Guided toggle is on OR the FC is already in its guided mode —
+   *  a mid-flight connect to a vehicle sitting in GUIDED must be commandable without first toggling
+   *  the panel button (which would re-send the mode change). */
+  function guidedClickArmed(): boolean {
+    return get(guidedActive) || get(activeMode)?.guided === true;
+  }
+
   function closeGuidedPopup() {
     if (guidedForm) { void unmount(guidedForm); guidedForm = undefined; }
     if (guidedPopup) { map?.closePopup(guidedPopup); guidedPopup = undefined; }
   }
 
   function onGuidedClick(e: L.LeafletMouseEvent) {
-    if (!map || !get(guidedActive)) return;
+    if (!map || !guidedClickArmed()) return;
+    // The mission editors and the survey generator own map clicks while active — before, arming
+    // Guided was always an explicit button press, now it can be implicit (FC already in guided),
+    // so these guards must be explicit here too.
+    if (get(editMode) || get(arduEditMode)) return;
+    if (activeSurveyPattern.isActive) return;
     // Ignore clicks that originate inside an open popup (e.g. the "Fly Here" button) — they must not
     // open a second target popup at the cursor.
     const tgt = e.originalEvent?.target as HTMLElement | undefined;

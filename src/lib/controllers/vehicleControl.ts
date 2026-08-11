@@ -73,8 +73,19 @@ export const guidedParams = writable<GuidedParams>({ alt: 50, speed: null, yaw: 
  *  Fly-Here radius is set. null = unknown / not applicable (multirotor). */
 export const fcLoiterRadius = writable<number | null>(null);
 
+// One param read per connection (the ingest path retriggers at 1 Hz and must not spam
+// PARAM_REQUEST_READ, e.g. on a copter where the FC never reports WP_LOITER_RAD).
+let loiterRadiusRequested = false;
+connection.subscribe((c) => {
+  if (c.status !== 'connected') {
+    loiterRadiusRequested = false;
+    fcLoiterRadius.set(null); // never carry a stale radius into the next session
+  }
+});
+
 /** Read the FC's default loiter radius for the ring (fixed-wing only — a copter holds the point). */
 async function refreshFcLoiterRadius(): Promise<void> {
+  loiterRadiusRequested = true;
   const cls = get(arduVehicleClass);
   if (cls !== 'plane' && cls !== 'quadplane') {
     fcLoiterRadius.set(null);
@@ -98,6 +109,9 @@ async function refreshFcLoiterRadius(): Promise<void> {
  */
 export function ingestFcGuidedTarget(lat: number, lon: number): void {
   if (get(activeMode)?.guided !== true) return;
+  // Connected mid-flight to a vehicle already in guided → the toggle was never pressed, so fetch
+  // the loiter radius for the ring here (once per connection).
+  if (!loiterRadiusRequested) void refreshFcLoiterRadius();
   const cur = get(guidedTarget);
   // ~0.1 m dedup so the 1 Hz push doesn't churn every subscriber with sub-metre jitter.
   if (cur && Math.abs(cur.lat - lat) < 1e-6 && Math.abs(cur.lon - lon) < 1e-6) return;
