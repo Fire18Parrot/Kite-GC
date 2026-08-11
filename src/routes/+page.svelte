@@ -374,8 +374,11 @@
     liveTelem = t;
     // Accumulate the live flown track (RAM) for the Terrain Analyzer
     const armed = isArmed(t.armingFlags, t.lastUpdate);
-    // Baseline the armed state on the first real frame after (re)connect → no false edge on reconnect.
-    if (!armEdgeInit && t.lastUpdate > 0) { armEdgeInit = true; prevArmed = armed; }
+    // Baseline the armed state on the first frame that actually CARRIES it (statusSeen) → no false
+    // edge on reconnect. Gating on any first frame (lastUpdate) raced: attitude/GPS at 5–10 Hz beat
+    // the 1 Hz status after a reconnect, seeding prevArmed=false from a frame without arming info —
+    // the first real status then looked like an arm edge and moved Home to wherever the aircraft was.
+    if (!armEdgeInit && t.statusSeen) { armEdgeInit = true; prevArmed = armed; }
     if (armed && !prevArmed) {
       clearLiveTrack();
       // reset the flight-stats accumulator for the new flight
@@ -414,7 +417,10 @@
     // reference once from the current fix (mirrored into a manual home below → the widget points to it).
     if (armed && !prevArmed && t.fixType >= 2 && isValidGpsCoordinate(t.lat, t.lon)) {
       if (get(connection).status === 'connected') {
-        homePosition.set({ lat: t.lat, lon: t.lon, alt: t.altitude, set: true, source: 'fc' });
+        // altMsl, NOT t.altitude (relative): Home consumers treat alt as AMSL (the HOME_POSITION /
+        // MSP_WP0 paths store AMSL, Map3D places the "H" absolutely) — the relative alt (~0 at a
+        // ground arm) sank the 3D marker below the terrain by the local elevation.
+        homePosition.set({ lat: t.lat, lon: t.lon, alt: t.altMsl, set: true, source: 'fc' });
         launchPoint.set({ lat: t.lat, lng: t.lon });
       } else if (get(homePosition).source !== 'fc') {
         launchPoint.set({ lat: t.lat, lng: t.lon });
