@@ -102,9 +102,28 @@ Release builds are signed with the **debug** keystore unless you supply a real o
 with no signature at all cannot be installed — Android rejects it as an invalid package. That is
 enough to sideload, and not enough to publish.
 
-The debug keystore is generated per machine, so a build from CI and a build from your laptop have
-different signatures. Android will refuse to install one over the other; **uninstall the old copy
-first** when switching between them (or between two CI runs).
+⚠️ **The debug keystore is generated per machine, and a CI runner is a fresh machine every run.** So
+consecutive CI builds have *different* signatures, and Android refuses to install one over the other
+("package conflicts with an existing package"). Updating then means uninstalling — which erases the
+flight database. Supply a real key and the problem disappears for good.
+
+**For CI**, add four repository secrets and the workflow signs every build with the same key:
+
+```bash
+keytool -genkey -v -keystore kite.jks -alias kite -keyalg RSA -keysize 2048 -validity 10000
+base64 -w0 kite.jks     # → KEYSTORE_B64
+```
+
+| Secret | Value |
+| --- | --- |
+| `KEYSTORE_B64` | base64 of the `.jks` |
+| `KEYSTORE_PASSWORD` | store password |
+| `KEY_ALIAS` | key alias (`kite` above) |
+| `KEY_PASSWORD` | key password |
+
+With none set the build still succeeds — it just warns and uses the throwaway key. Keep the `.jks`
+and its passwords somewhere safe: lose them and you can never update an installed app again, only
+replace it.
 
 To sign with a real key, drop a `key.properties` next to `gen/android/app/build.gradle.kts`:
 

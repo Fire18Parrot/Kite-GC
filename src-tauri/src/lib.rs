@@ -23,6 +23,7 @@ mod state;
 mod telemetry_forward;
 mod terrain;
 mod transport;
+mod user_file;
 mod video;
 
 use commands::connection::{connect, disconnect, list_serial_ports, scan_ble_devices, ble_scan_start, ble_scan_stop, inav_set_craft_name, inav_read_stats};

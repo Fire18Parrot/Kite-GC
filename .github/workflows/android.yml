@@ -3,8 +3,10 @@
 # Builds the Android app and uploads the APK as a workflow artifact. Run it from the Actions tab
 # ("Run workflow"), or let it run automatically when something that affects the mobile build changes.
 #
-# There is no signing key here: the APK is signed with the debug keystore Gradle generates, which is
-# enough to sideload but NOT for the Play Store. Installing it means allowing "install unknown apps"
+# Signing: if the repository has a KEYSTORE_B64 secret the APK is signed with that key, so every build
+# installs over the last one. Without it the build falls back to a debug keystore that the runner
+# regenerates each time — installable, but never *updatable*, since the signature changes every run.
+# Either way this is a sideload build, not a Play Store one: you need "install unknown apps" allowed
 # for whatever app you download it with.
 #
 # Why CI and not a local build: the Android SDK + NDK are ~6 GB, and the runner image already has the
@@ -47,6 +49,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Lifted to workflow level so the signing steps can test it in their `if:` — a step's own `env:`
+  # block is not visible to that step's condition, which would make the test silently always-false.
+  KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
   # Pinned rather than "latest": the NDK is the C toolchain the Rust cross-build links against, and an
   # NDK bump is exactly the kind of change that should be a visible commit rather than a silent
   # difference between two runs of the same workflow. r27 is the current LTS.
@@ -94,6 +99,43 @@ jobs:
             echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/aarch64-linux-android24-clang"
           } >> "$GITHUB_ENV"
           echo "$BIN" >> "$GITHUB_PATH"
+
+      # A stable signing key, if the repository provides one.
+      #
+      # Without this, `release` falls back to the debug keystore — and a GitHub runner is ephemeral, so
+      # Gradle generates a *fresh* one on every run. Every build then carries a different signature and
+      # Android refuses to install it over the previous one ("package conflicts with an existing
+      # package"), which means an uninstall and the loss of the flight database on every single update.
+      #
+      # Set four repository secrets to fix that permanently:
+      #   KEYSTORE_B64       base64 of a .jks  (base64 -w0 kite.jks)
+      #   KEYSTORE_PASSWORD  its store password
+      #   KEY_ALIAS          the key alias inside it
+      #   KEY_PASSWORD       that key's password
+      # With none set the build still works exactly as before — just with the throwaway debug key.
+      - name: Configure signing key
+        if: ${{ env.KEYSTORE_B64 != '' }}
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          APP_DIR=src-tauri/gen/android/app
+          echo "$KEYSTORE_B64" | base64 -d > "$APP_DIR/release.jks"
+          # storeFile is resolved relative to the module directory by build.gradle.kts.
+          {
+            echo "storeFile=release.jks"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > "$APP_DIR/key.properties"
+          echo "Signing with the repository keystore."
+
+      - name: Note the signing key in use
+        if: ${{ env.KEYSTORE_B64 == '' }}
+        run: |
+          echo "::warning::No KEYSTORE_B64 secret — signing with a throwaway debug key. This APK will \
+          NOT install over a previous build; updating requires an uninstall, which erases app data."
 
       # --- Frontend ---
       - name: Setup Node.js
