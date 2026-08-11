@@ -389,8 +389,11 @@ fn log_bt_spp_diagnostics(_target: &str) {}
 /// USB vendor IDs of USB↔UART **bridge** chips. A port behind one of these is a real UART on the far
 /// side — a telemetry radio, an FTDI cable, an ESP32 dev board — not a flight controller's own USB
 /// device. Everything else on USB that presents a serial port is a native CDC/VCP implemented by the
-/// target MCU's own USB stack (STM32 0x0483, RP2040 0x2E8A, AT32, …), which is the case the MSP
-/// scheduler narrows its in-flight window for.
+/// device's own USB stack (STM32 0x0483, RP2040 0x2E8A, Espressif 0x303A, …). Diagnostic only: a
+/// native CDC's OUT endpoint can NAK while its TX is busy (the Lucid H7 Wing write-stall case), so a
+/// tester's log should say which kind of port a session ran on. NOTE deliberately no behaviour is
+/// keyed off this — an ESP32 Kite-Link node is also a native CDC but bridges to a slow SiK air link,
+/// where narrowing the MSP pipeline would cripple the poll rate.
 const USB_UART_BRIDGE_VIDS: &[u16] = &[
     0x0403, // FTDI
     0x10C4, // Silicon Labs CP210x
@@ -420,8 +423,6 @@ fn is_native_usb_cdc(port_name: &str) -> bool {
 pub struct SerialConnection {
     port_name: String,
     port: Box<dyn serialport::SerialPort>,
-    /// Native USB CDC/VCP (FC's own USB port) — see `is_native_usb_cdc`. Decided once at open.
-    is_usb_cdc: bool,
 }
 
 // Safety: serialport::SerialPort requires Send, Box<dyn SerialPort> is Send
@@ -446,17 +447,12 @@ impl SerialConnection {
                         eprintln!("[serial] {} opened on attempt {}/{}", port_name, attempt, OPEN_RETRY_ATTEMPTS);
                         log::info!("Serial port {} opened on attempt {}/{}", port_name, attempt, OPEN_RETRY_ATTEMPTS);
                     }
-                    let is_usb_cdc = is_native_usb_cdc(port_name);
-                    if is_usb_cdc {
-                        log::info!(
-                            "Serial {}: native USB CDC/VCP — MSP scheduler will use the strict request→response window",
-                            port_name,
-                        );
+                    if is_native_usb_cdc(port_name) {
+                        log::info!("Serial {}: native USB CDC/VCP (not behind a USB↔UART bridge)", port_name);
                     }
                     let mut conn = Self {
                         port_name: port_name.to_string(),
                         port,
-                        is_usb_cdc,
                     };
                     // Raise DTR/RTS like every standard tool does on open (INAV Configurator, Mission
                     // Planner, terminals). USB-CDC devices gate their device→host stream on DTR
@@ -536,9 +532,5 @@ impl ByteTransport for SerialConnection {
 
     fn description(&self) -> String {
         format!("Serial({})", self.port_name)
-    }
-
-    fn is_usb_cdc(&self) -> bool {
-        self.is_usb_cdc
     }
 }

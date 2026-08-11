@@ -81,14 +81,6 @@ pub trait ByteTransport: Send {
 
     /// Human-readable description (for logging)
     fn description(&self) -> String;
-
-    /// True for a native USB CDC/VCP — the flight controller's own USB port, where the device's USB
-    /// stack sits between us and the MSP parser. Some CDC implementations NAK their OUT endpoint
-    /// while TX is pending, so the MSP scheduler runs strict request→response there instead of
-    /// pipelining. Default `false` (non-serial transports and USB↔UART bridges).
-    fn is_usb_cdc(&self) -> bool {
-        false
-    }
 }
 
 // ── Legacy Transport Trait ───────────────────────────────────────
@@ -155,12 +147,6 @@ pub trait Transport: Send {
     /// `ERROR_OPERATION_ABORTED` after a framing/overrun error). `None` before any failure.
     fn connection_lost_reason(&self) -> Option<String> {
         None
-    }
-
-    /// True for a native USB CDC/VCP link — see `ByteTransport::is_usb_cdc`. The scheduler narrows
-    /// its in-flight window to 1 on such links.
-    fn is_usb_cdc(&self) -> bool {
-        false
     }
 }
 

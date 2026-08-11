@@ -320,22 +320,12 @@ fn scheduler_loop(
     // independent of the dev-only Debug Monitor tracker above.
     let mut link_stats = LinkStats::new();
 
-    // Native USB CDC/VCP (the FC's own USB port): strict request→response — drain the reply before
-    // the next write. Field case (TBS Lucid H7 Wing, INAV 9.0.1): its CDC OUT endpoint NAKs while
-    // the FC is producing replies, so any overlap of "reply pending" and "next request written"
-    // stalls the write past the short port timeout (Windows applies it to writes too → os error
-    // 121), and the original full-window pipeline flooded the FC's TX buffer clean off the USB bus.
-    // window=1 verified by the reporter; UART bridges / TCP / BLE keep the pipeline — the slow air
-    // links are what it exists for.
-    let max_in_flight = if transport.is_usb_cdc() { 1 } else { MAX_IN_FLIGHT };
-
     log::info!(
-        "Scheduler started: {} telemetry slots (attitude={:.0}Hz, position={:.0}Hz, airspeed={}, window={})",
+        "Scheduler started: {} telemetry slots (attitude={:.0}Hz, position={:.0}Hz, airspeed={})",
         slots.len(),
         config.attitude_rate_hz,
         config.position_rate_hz,
         if config.airspeed_enabled { "on" } else { "off" },
-        max_in_flight,
     );
 
     // Stall watchdog: warn once at the default log level when the transport stays open but the FC/link
@@ -510,7 +500,7 @@ fn scheduler_loop(
             .count();
         if radar_msp_enabled.load(Ordering::Relaxed)
             && radar_last.elapsed() >= RADAR_MSP_INTERVAL
-            && tele_in_flight < max_in_flight
+            && tele_in_flight < MAX_IN_FLIGHT
             && writes_this_tick < MAX_WRITES_PER_TICK
             && !in_flight
                 .get(&crate::msp::MSP2_ADSB_VEHICLE_LIST)
@@ -556,7 +546,7 @@ fn scheduler_loop(
         // Two independent limits: how many replies may be outstanding (`MAX_IN_FLIGHT`, the pipeline
         // depth that keeps slow air links busy) and how many frames may be written before the next drain
         // (`MAX_WRITES_PER_TICK`, the soft lock). The tighter of the two wins.
-        let mut budget = max_in_flight
+        let mut budget = MAX_IN_FLIGHT
             .saturating_sub(tele_in_flight)
             .min(MAX_WRITES_PER_TICK.saturating_sub(writes_this_tick));
         let mut due: Vec<usize> = (0..slots.len())

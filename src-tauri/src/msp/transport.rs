@@ -193,8 +193,4 @@ impl Transport for MspTransport {
     fn connection_lost_reason(&self) -> Option<String> {
         self.lost_reason.clone()
     }
-
-    fn is_usb_cdc(&self) -> bool {
-        self.inner.is_usb_cdc()
-    }
 }
