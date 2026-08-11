@@ -61,15 +61,28 @@ impl MspTransport {
         self.inner
     }
 
-    /// Write a pre-encoded MSP frame, raw-logging it and flagging a lost connection on write failure.
+    /// Write a pre-encoded MSP frame, raw-logging it on success. A write TIMEOUT is a retryable
+    /// stall, not a lost device: on Windows the short scheduler read timeout applies to writes too
+    /// (`WriteTotalTimeoutConstant`), and a USB-CDC FC that NAKs its OUT endpoint while producing
+    /// telemetry trips it (ERROR_SEM_TIMEOUT, os error 121 — field case TBS Lucid H7 Wing). The
+    /// frame is dropped (a telemetry poll simply retries next cycle; the FC's MSP parser resyncs on
+    /// the next '$' if part of the frame made it out) and the session lives on. Any OTHER write
+    /// error still means the device is gone and flags the connection lost.
     fn write_frame(&mut self, frame: Vec<u8>) -> Result<(), String> {
-        if let Err(e) = self.inner.write_bytes(&frame) {
-            // Failed write = device gone (same as msp_request).
-            self.mark_lost(format!("write failed: {}", e));
-            return Err(format!("MSP send failed: {}", e));
+        match self.inner.write_bytes(&frame) {
+            Ok(()) => {
+                log_to_sink(&self.raw_sink, DIR_OUT, &frame);
+                Ok(())
+            }
+            Err(crate::transport::TransportError::Timeout) => {
+                log::debug!("MSP write timed out — frame dropped (device busy, not gone)");
+                Err("MSP write timeout (frame dropped)".to_string())
+            }
+            Err(e) => {
+                self.mark_lost(format!("write failed: {}", e));
+                Err(format!("MSP send failed: {}", e))
+            }
         }
-        log_to_sink(&self.raw_sink, DIR_OUT, &frame);
-        Ok(())
     }
 }
 
@@ -79,16 +92,10 @@ impl Transport for MspTransport {
     }
 
     fn msp_request_timeout(&mut self, code: u16, payload: &[u8], timeout_ms: u64) -> Result<MspMessage, String> {
-        // Encode and send MSP v2 frame
-        let frame = MspCodec::encode_v2(code, payload);
-        if let Err(e) = self.inner.write_bytes(&frame) {
-            // A failed write means the device is gone (the local port handle is invalid) — fatal,
-            // distinct from a no-reply timeout on the air link.
-            self.mark_lost(format!("write failed: {}", e));
-            return Err(format!("MSP write failed: {}", e));
-        }
-        // Raw-log the outgoing frame (ADR-049).
-        log_to_sink(&self.raw_sink, DIR_OUT, &frame);
+        // Encode and send MSP v2 frame. `write_frame` raw-logs it (ADR-049) and classifies write
+        // errors: a write timeout is a dropped frame (device busy), anything else flags the
+        // connection lost.
+        self.write_frame(MspCodec::encode_v2(code, payload))?;
 
         // Read until we get the matching response or timeout
         let mut buf = [0u8; 512];
@@ -185,5 +192,9 @@ impl Transport for MspTransport {
 
     fn connection_lost_reason(&self) -> Option<String> {
         self.lost_reason.clone()
+    }
+
+    fn is_usb_cdc(&self) -> bool {
+        self.inner.is_usb_cdc()
     }
 }
