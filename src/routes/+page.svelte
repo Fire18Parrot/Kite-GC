@@ -76,6 +76,7 @@
   import { buildMissionInput } from '$lib/helpers/missionLibrary';
   import { buildArduMissionInput } from '$lib/helpers/missionLibraryArdu';
   import { homePosition } from '$lib/stores/home';
+  import { ingestFcGuidedTarget } from '$lib/controllers/vehicleControl';
   import { MAP_PROVIDERS } from "$lib/config/mapProviders";
   import { tileCacheStats, setCacheMaxMB, clearCache } from "$lib/cache/tileCache";
   import { weatherTempDisplayFromC, weatherWindDisplayFromMs, weatherTempCFromDisplay, weatherWindMsFromDisplay, canonicalWeatherDescription } from "$lib/helpers/weather";
@@ -2426,6 +2427,11 @@
       if (unchanged) return;
       homePosition.set({ lat, lon, alt, set: true, source: 'fc' }); // authoritative → locked green "H"
       launchPoint.set({ lat, lng: lon }); // pin the planning reference to the real home
+    });
+    // FC-confirmed Guided target (POSITION_TARGET_GLOBAL_INT, 1 Hz) — the controller gates it on the
+    // FC actually being in its guided mode (in AUTO/RTL the same message carries the mission WP/home).
+    void listen<{ lat: number; lon: number; alt: number }>('guided-target', (event) => {
+      ingestFcGuidedTarget(event.payload.lat, event.payload.lon);
     });
   }
 
