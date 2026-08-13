@@ -77,6 +77,8 @@ struct Snap {
     hdop: Option<f64>,
     eph: Option<f64>,
     epv: Option<f64>,
+    wind_n: Option<f64>,
+    wind_e: Option<f64>,
 }
 
 /// Vehicle identity recovered from the log (MSP handshake frames, if captured — continuous mode — or
@@ -138,9 +140,9 @@ fn snap_to_record(s: &Snap, t_ms: i64) -> TelemetryRecord {
         rx_signal_received: None,
         hw_health_status: None,
         baro_temperature: None,
-        wind_n_ms: None,
-        wind_e_ms: None,
-        wind_d_ms: None,
+        wind_n_ms: s.wind_n,
+        wind_e_ms: s.wind_e,
+        wind_d_ms: None, // no column is fed from WIND.speed_z live either
         rc_data_json: None,
         rc_command_json: None,
         nav_lat: None,
@@ -403,8 +405,15 @@ fn update_from_mav(msg: &MavMessage, s: &mut Snap, armed: &mut bool, variant: &s
             s.lon = Some(g.lon as f64 / 1e7);
             s.alt_gps = Some(g.alt as f64 / 1000.0);
             s.alt_baro = Some(g.relative_alt as f64 / 1000.0);
-            if g.hdg != u16::MAX {
-                s.heading = Some(g.hdg as f64 / 100.0);
+            // `heading` is the course-over-ground column (see `TelemetryRecord`); the FC's own heading
+            // is stored separately as `yaw` from ATTITUDE. `g.hdg` is the vehicle HEADING, not the
+            // course — writing it here made a replayed flight report a course identical to its heading,
+            // so the compass showed no crab angle while the map model, rotated by `yaw`, correctly drew
+            // one. Derive the course from the fused velocity like the live handler does; below walking
+            // pace that is just atan2 of velocity noise, so hold the previous value.
+            let ground_speed = ((g.vx as f64).powi(2) + (g.vy as f64).powi(2)).sqrt() / 100.0;
+            if ground_speed > 0.5 {
+                s.heading = Some((g.vy as f64).atan2(g.vx as f64).to_degrees().rem_euclid(360.0));
             }
             true
         }
@@ -428,6 +437,16 @@ fn update_from_mav(msg: &MavMessage, s: &mut Snap, armed: &mut bool, variant: &s
         MavMessage::VFR_HUD(h) => {
             s.speed = Some(h.groundspeed as f64);
             s.vario = Some(h.climb as f64);
+            false
+        }
+        MavMessage::WIND(w) => {
+            // ArduPilot's EKF wind estimate: `direction` is the bearing the wind blows FROM. Store the
+            // vector it blows TOWARD as north/east components, matching what the live recorder writes
+            // (`Recorder::on_wind`), so an imported flight drives the compass exactly like a recorded
+            // one. `speed_z` has no column, same as live.
+            let toward = (w.direction as f64 + 180.0).to_radians();
+            s.wind_n = Some(w.speed as f64 * toward.cos());
+            s.wind_e = Some(w.speed as f64 * toward.sin());
             false
         }
         MavMessage::SYS_STATUS(sys) => {
@@ -679,7 +698,9 @@ pub fn import_raw_log_with_progress<F: Fn(u8, &str, &str)>(
 mod tests {
     use super::*;
 
-    use ::mavlink::ardupilotmega::{MavState, ATTITUDE_DATA, HEARTBEAT_DATA};
+    use ::mavlink::ardupilotmega::{
+        MavState, ATTITUDE_DATA, GLOBAL_POSITION_INT_DATA, HEARTBEAT_DATA, WIND_DATA,
+    };
     use ::mavlink::MavHeader;
 
     use crate::mavlink_proto::codec::{serialize_v2, MavSequence};
@@ -733,5 +754,42 @@ mod tests {
         let sample = samples.last().expect("ATTITUDE should emit a sample");
         assert_eq!(sample.rec.mode_primary.as_deref(), Some("guided"));
         assert!(sample.armed, "the autopilot heartbeat is armed");
+    }
+
+    /// The `heading` column is course over ground, not the vehicle heading — `GLOBAL_POSITION_INT.hdg`
+    /// is the latter, so deriving the course from the fused velocity is what keeps a replayed crab
+    /// angle honest. WIND rides along here because both are read off the same message stream.
+    #[test]
+    fn course_comes_from_velocity_and_wind_is_captured() {
+        // Heading due east, but travelling due north: a 90° crab that `hdg` alone would hide.
+        let gpi = MavMessage::GLOBAL_POSITION_INT(GLOBAL_POSITION_INT_DATA {
+            time_boot_ms: 0,
+            lat: 42_700_000,
+            lon: 22_880_000,
+            alt: 200_000,
+            relative_alt: 100_000,
+            vx: 1500, // cm/s north
+            vy: 0,
+            vz: 0,
+            hdg: 9000, // 90.00° heading
+        });
+        let wind = MavMessage::WIND(WIND_DATA { direction: 60.0, speed: 6.0, speed_z: 0.0 });
+
+        let log = tlog(vec![
+            (1, 1, heartbeat(MavType::MAV_TYPE_FIXED_WING, MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA, 15)),
+            (1, 1, wind),
+            (1, 1, gpi),
+        ]);
+
+        let (samples, _) = decode_tlog(&log);
+        let rec = &samples.last().expect("GLOBAL_POSITION_INT should emit a sample").rec;
+
+        let course = rec.heading.expect("course recorded");
+        assert!(course < 0.5 || course > 359.5, "course should follow the velocity (0°), got {course}");
+
+        // Wind blows FROM 60°, so the vector points TOWARD 240°: north −3.0, east −5.196.
+        let (n, e) = (rec.wind_n_ms.expect("wind north"), rec.wind_e_ms.expect("wind east"));
+        assert!((n - -3.0).abs() < 0.01, "wind north {n}");
+        assert!((e - -5.196).abs() < 0.01, "wind east {e}");
     }
 }
