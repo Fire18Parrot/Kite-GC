@@ -322,6 +322,8 @@ fn decode_tlog(bytes: &[u8]) -> (Vec<Sample>, Identity) {
     // Vehicle identity from the (continuously streamed) HEARTBEAT — defaults until the first one.
     let mut variant = "ArduCopter".to_string();
     let mut platform: u8 = 0;
+    // The autopilot's (system, component) id, locked onto the first HEARTBEAT that identifies one.
+    let mut fc_id: Option<(u8, u8)> = None;
     let mut i = 0usize;
 
     while i + 8 <= bytes.len() {
@@ -338,15 +340,30 @@ fn decode_tlog(bytes: &[u8]) -> (Vec<Sample>, Identity) {
             guard += 1;
             if let Some(frame) = parser.push(b) {
                 got = true;
-                // Vehicle identity (skip our own GCS heartbeat) → drives the mode table + flight model.
+                // A tlog carries every component on the link, not just the autopilot. Peripherals that
+                // share the vehicle's system id — a camera on component 100, a gimbal on 154 — publish
+                // their own HEARTBEATs with their own `custom_mode`, so consuming all of them makes the
+                // replayed flight mode flap between senders once a second, and lets a peripheral's
+                // `autopilot` field overwrite `variant`, which selects the mode table. Lock onto the
+                // autopilot the way the live handshake does and ignore heartbeats from anything else.
+                // Other message types stay unfiltered, matching the live handler.
+                let mut consume = true;
                 if let MavMessage::HEARTBEAT(hb) = &frame.message {
-                    if hb.mavtype != MavType::MAV_TYPE_GCS {
+                    let id = (frame.header.system_id, frame.header.component_id);
+                    let is_autopilot = hb.mavtype != MavType::MAV_TYPE_GCS
+                        && (hb.autopilot != MavAutopilot::MAV_AUTOPILOT_INVALID || id.1 == 1);
+                    if fc_id.is_none() && is_autopilot {
+                        fc_id = Some(id);
+                    }
+                    consume = fc_id == Some(id);
+                    if consume {
+                        // Vehicle identity → drives the mode table + flight model.
                         let (v, p) = ardu_type_info(hb.autopilot, hb.mavtype);
                         variant = v;
                         platform = p;
                     }
                 }
-                if update_from_mav(&frame.message, &mut snap, &mut armed, &variant) {
+                if consume && update_from_mav(&frame.message, &mut snap, &mut armed, &variant) {
                     samples.push(Sample { t_ms, rec: snap_to_record(&snap, t_ms), armed });
                 }
             }
@@ -364,7 +381,8 @@ fn decode_tlog(bytes: &[u8]) -> (Vec<Sample>, Identity) {
 fn update_from_mav(msg: &MavMessage, s: &mut Snap, armed: &mut bool, variant: &str) -> bool {
     match msg {
         MavMessage::HEARTBEAT(hb) => {
-            // Ignore our own GCS heartbeat (it would flap `armed` false) — only the vehicle's counts.
+            // The caller already restricts heartbeats to the locked autopilot component; this keeps the
+            // GCS guard as a second line (our own heartbeat would flap `armed` false).
             if hb.mavtype != MavType::MAV_TYPE_GCS {
                 *armed = hb.base_mode.bits() & MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED.bits() != 0;
                 s.flight_mode_flags = Some(hb.custom_mode);
@@ -655,4 +673,65 @@ pub fn import_raw_log_with_progress<F: Fn(u8, &str, &str)>(
 
     emit(100, "done", "Raw log import complete.");
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ::mavlink::ardupilotmega::{MavState, ATTITUDE_DATA, HEARTBEAT_DATA};
+    use ::mavlink::MavHeader;
+
+    use crate::mavlink_proto::codec::{serialize_v2, MavSequence};
+
+    fn heartbeat(mavtype: MavType, autopilot: MavAutopilot, custom_mode: u32) -> MavMessage {
+        MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+            custom_mode,
+            mavtype,
+            autopilot,
+            base_mode: MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED,
+            system_status: MavState::MAV_STATE_ACTIVE,
+            mavlink_version: 3,
+        })
+    }
+
+    /// Wrap frames in the tlog container: `[u64 BE µs][frame]`, one second apart.
+    fn tlog(frames: Vec<(u8, u8, MavMessage)>) -> Vec<u8> {
+        let mut seq = MavSequence::new();
+        let mut out = Vec::new();
+        for (n, (system_id, component_id, msg)) in frames.into_iter().enumerate() {
+            out.extend_from_slice(&((n as u64 + 1) * 1_000_000).to_be_bytes());
+            let header = MavHeader { system_id, component_id, sequence: 0 };
+            out.extend_from_slice(&serialize_v2(&header, &msg, &mut seq));
+        }
+        out
+    }
+
+    /// A SIYI-style link publishes HEARTBEATs from a camera and a gimbal under the vehicle's own
+    /// system id. Only the autopilot's may drive the flight mode and the vehicle identity — otherwise
+    /// the replayed mode flaps between all three senders once a second, and the peripherals'
+    /// `MAV_AUTOPILOT_INVALID` overwrites the variant that selects the mode table.
+    #[test]
+    fn peripheral_heartbeats_do_not_drive_mode_or_identity() {
+        let log = tlog(vec![
+            // ArduPlane in GUIDED (plane custom_mode 15).
+            (1, 1, heartbeat(MavType::MAV_TYPE_FIXED_WING, MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA, 15)),
+            // Gimbal: custom_mode 0, which a copter table would read as "stabilize".
+            (1, 154, heartbeat(MavType::MAV_TYPE_GIMBAL, MavAutopilot::MAV_AUTOPILOT_INVALID, 0)),
+            // Camera: custom_mode 65535, which matches no mode at all.
+            (1, 100, heartbeat(MavType::MAV_TYPE_CAMERA, MavAutopilot::MAV_AUTOPILOT_INVALID, 65535)),
+            // Our own GCS heartbeat, echoed back into the log by the link.
+            (255, 190, heartbeat(MavType::MAV_TYPE_GCS, MavAutopilot::MAV_AUTOPILOT_INVALID, 0)),
+            // ATTITUDE emits the sample that carries the mode.
+            (1, 1, MavMessage::ATTITUDE(ATTITUDE_DATA::default())),
+        ]);
+
+        let (samples, identity) = decode_tlog(&log);
+
+        assert_eq!(identity.fc_variant.as_deref(), Some("ArduPlane"));
+        assert_eq!(identity.platform_type, 1);
+        let sample = samples.last().expect("ATTITUDE should emit a sample");
+        assert_eq!(sample.rec.mode_primary.as_deref(), Some("guided"));
+        assert!(sample.armed, "the autopilot heartbeat is armed");
+    }
 }
