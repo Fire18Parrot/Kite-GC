@@ -1,7 +1,7 @@
 # Kite Ground Control - Android APK
 #
 # Builds the Android app and uploads the APK as a workflow artifact. Run it from the Actions tab
-# ("Run workflow"), or let it run automatically when something that affects the mobile build changes.
+# ("Run workflow"); it also runs on its own when one of the Android-only files changes (see `on:`).
 #
 # Signing: if the repository has a KEYSTORE_B64 secret the APK is signed with that key, so every build
 # installs over the last one. Without it the build falls back to a debug keystore that the runner
@@ -15,6 +15,18 @@
 # the toolchain is in place.
 name: Android
 
+# Manual by default. An APK build costs ~15 minutes of a runner and produces an artifact nobody looks
+# at unless they asked for one, so it is not something every push to `src/` should pay for — the
+# desktop workflows are what gate ordinary changes.
+#
+# The push trigger is deliberately limited to files that exist *only* for the Android build: the
+# generated Gradle project, the Android-only Rust modules, and this workflow. Those cannot break
+# anything else, and nothing else can break them without also failing `cargo check` on desktop — so a
+# change that touches them is exactly the change worth spending a runner on automatically.
+#
+# Not listed, on purpose: `src/**`, `src-tauri/src/**` in general, and `Cargo.toml`. A dependency bump
+# or a shared-code change *can* break the mobile target, but it does so rarely enough that catching it
+# is worth a manual run rather than a build on every commit. Use "Run workflow" when in doubt.
 on:
   workflow_dispatch:
     inputs:
@@ -27,16 +39,11 @@ on:
   push:
     branches: [master, main, development]
     paths:
-      - 'src-tauri/**'
-      - 'src/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - '.github/workflows/android.yml'
-  pull_request:
-    branches: [master, main, development]
-    paths:
-      - 'src-tauri/**'
-      - 'src/**'
+      - 'src-tauri/gen/android/**'
+      - 'src-tauri/src/android.rs'
+      - 'src-tauri/src/android/**'
+      - 'src-tauri/src/transport/serial_android.rs'
+      - 'src-tauri/src/transport/ble_android.rs'
       - '.github/workflows/android.yml'
 
 # One APK build per branch at a time. Besides not paying for two builds of the same branch, this is the
