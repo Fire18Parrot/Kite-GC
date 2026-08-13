@@ -9,7 +9,7 @@
   import Button from '$lib/components/panel/Button.svelte';
   import SegmentedToggle from '$lib/components/panel/SegmentedToggle.svelte';
   import WindowControls from '$lib/components/WindowControls.svelte';
-  import { isMacOS } from '$lib/platform';
+  import { isMacOS, isLinux } from '$lib/platform';
   import ConnectionStatusBox from '$lib/components/ConnectionStatusBox.svelte';
   import ArmingIndicator from '$lib/components/ArmingIndicator.svelte';
   import BatteryIndicator from '$lib/components/BatteryIndicator.svelte';
@@ -224,7 +224,8 @@
 
   // Double-click the title bar to maximize/restore. Windows/macOS drag regions already do this
   // natively, so only Linux/GTK needs the manual handler (otherwise it would toggle twice).
-  const isLinux = typeof navigator !== 'undefined' && navigator.userAgent.includes('Linux');
+  // `isLinux` is the shared helper from $lib/platform, not a local user-agent test: every other
+  // platform check in the app already goes through that module, and its test is the stricter one.
   function onTitlebarDblClick(e: MouseEvent) {
     if (!isLinux) return;
     // Ignore double-clicks that land on interactive controls (buttons, selects, the window buttons).
