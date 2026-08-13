@@ -826,6 +826,12 @@
     } catch (e) {
       console.warn('[Map3D] applyIonToken: failed to enable world terrain', e);
     }
+    // Buildings are an Ion asset too, so a token arriving now is what unblocks them. Without this a
+    // user whose `buildings3D` was already on — persisted from a session that had a token, or set
+    // before one was entered — would get terrain but no buildings, and the settings watcher would
+    // never fire to fix it because the value did not change. `applyBuildings` is a no-op when the
+    // setting is off, so this costs nothing in the ordinary case.
+    void applyBuildings();
   }
 
   export function getCamFocus(): { lat: number; lon: number; range: number; heading: number; pitch: number } | null {
@@ -2594,8 +2600,9 @@
    * toggling it during a flight does not re-download anything.
    *
    * Needs a Cesium Ion token — the tileset is an Ion asset, exactly like World Terrain. Without one
-   * the Settings toggle is disabled, but this is checked here too because the token can be cleared
-   * while the viewer is alive.
+   * the Settings toggle is disabled, but the token is checked here too rather than only at viewer
+   * creation: the viewer may well have started with no token, and `applyIonToken` can supply one
+   * later without a restart. That path calls back in here for exactly this reason.
    */
   async function applyBuildings() {
     if (!viewer) return;
