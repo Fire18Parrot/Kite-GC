@@ -512,7 +512,6 @@
   let cesiumIonToken = $state("");
   let altitudeCurtain3D = $state(true);
   let realLighting3D = $state(false);
-  let buildings3D = $state(false);
   let logReplayTime = $state(false);
   let nightMode2D = $state<'off' | 'auto' | 'on'>('off');
   let gcsMode = $state<GcsMode>('manual');
@@ -737,7 +736,6 @@
   cesiumIonToken = saved.cesiumIonToken ?? '';
   altitudeCurtain3D = saved.altitudeCurtain3D ?? true;
   realLighting3D = saved.realLighting3D ?? false;
-  buildings3D = saved.buildings3D ?? false;
   logReplayTime = saved.logReplayTime ?? false;
   nightMode2D = saved.nightMode2D ?? 'off';
   gcsMode = saved.gcsMode ?? 'manual';
@@ -1009,7 +1007,6 @@
     if (patch.cesiumIonToken != null) cesiumIonToken = patch.cesiumIonToken;
     if (patch.altitudeCurtain3D != null) altitudeCurtain3D = patch.altitudeCurtain3D;
     if (patch.realLighting3D != null) realLighting3D = patch.realLighting3D;
-    if (patch.buildings3D != null) buildings3D = patch.buildings3D;
     if (patch.logReplayTime != null) logReplayTime = patch.logReplayTime;
     if (patch.nightMode2D != null) nightMode2D = patch.nightMode2D;
     if (patch.gcsMode != null) gcsMode = patch.gcsMode;
@@ -2561,6 +2558,7 @@
 
 <main
   class="app"
+  class:mobile={isMobile}
   style:--grid-bottom-height={gridBottomHeight}
   style:--grid-side-width={gridSideWidth}
 >
@@ -2692,7 +2690,6 @@
         {cesiumIonToken}
         {altitudeCurtain3D}
         {realLighting3D}
-        {buildings3D}
         {logReplayTime}
         {nightMode2D}
         lowPower3D={$settings.lowPower3D}
@@ -2981,16 +2978,24 @@
     position: relative;
     grid-template-rows: 53px 1fr var(--grid-bottom-height) 24px;
     grid-template-columns: 62px 1fr var(--grid-side-width) 54px;
-    /* The last column (54px) is a reserved gutter for the map's own zoom / view-mode buttons. Those
-       are NOT in this grid — they live in `Map.svelte`, absolutely positioned bottom-right of the
-       unzoomed map layer, which sits *below* the chrome. The column exists purely to keep chrome out
-       of the strip they occupy, which is why `.zone-map-controls` is an empty placeholder.
-       It has to be reserved for both content rows, not just the bottom one. The stack is ~176px tall
-       and grows up from the bottom of the map layer, so on a short screen it reaches well into the
-       row above — where the side dock was spanning into the gutter and covering it. That is how the
-       2D/3D button ended up hidden behind the battery widget on a phone in landscape.
-       Cost on desktop: the side dock loses those 54px. Its widgets are right-aligned, so they just
-       sit that much further in. */
+    grid-template-areas:
+      "toolbar      toolbar      toolbar      toolbar"
+      "nav-rail     panel        side-dock    side-dock"
+      "nav-rail     bottom-dock  bottom-dock  map-controls"
+      "status-bar   status-bar   status-bar   status-bar";
+  }
+
+  /* The last column (54px) is a reserved gutter for the map's own zoom / view-mode buttons. Those are
+     NOT in this grid — they live in `Map.svelte`, absolutely positioned bottom-right of the unzoomed
+     map layer, which sits *below* the chrome. The column exists purely to keep chrome out of the
+     strip they occupy, which is why `.zone-map-controls` is an empty placeholder.
+     On a phone the gutter has to be reserved for BOTH content rows, not just the bottom one. The
+     button stack is ~176px tall and grows up from the bottom of the map layer, so on a screen this
+     short it reaches well into the row above — where the side dock spans into the gutter and covers
+     it. That is how the 2D/3D button ends up hidden behind the battery widget in landscape.
+     Mobile only: a desktop window is tall enough that the stack never leaves the bottom row, and
+     taking the column away from the side dock there would cost its widgets 54px for nothing. */
+  .app.mobile {
     grid-template-areas:
       "toolbar      toolbar      toolbar      toolbar"
       "nav-rail     panel        side-dock    map-controls"
