@@ -41,9 +41,18 @@ const READ_TIMEOUT_MS: u64 = 50;
 /// link is gone, and there is no polling loop depending on this returning quickly.
 const WRITE_TIMEOUT_MS: i32 = 1000;
 
-/// Fetch `UsbSerial.lastError()`. Called only after a bridge call reports failure, so the cost of a
-/// second JNI round-trip does not matter; a failure to read it is itself reported rather than hidden.
-fn last_error() -> String {
+/// Handle passed to [`last_error`] for calls that have no handle of their own — `open` and the
+/// device listing. Kotlin keys its no-handle slot the same way; real handles start at 1.
+const NO_HANDLE: i32 = 0;
+
+/// Fetch `UsbSerial.lastError(handle)`. Called only after a bridge call reports failure, so the cost
+/// of a second JNI round-trip does not matter; a failure to read it is itself reported rather than
+/// hidden.
+///
+/// The handle is passed because the Kotlin side keeps the reason per link, not one global string:
+/// several connections can be open at once, each driven by its own thread, and a shared slot would
+/// let one link's failure be reported against another's.
+fn last_error(handle: i32) -> String {
     let mut env = match jvm::env() {
         Ok(env) => env,
         Err(e) => return e,
@@ -53,7 +62,12 @@ fn last_error() -> String {
         Err(e) => return e,
     };
     let r = env
-        .call_static_method(&class, "lastError", "()Ljava/lang/String;", &[])
+        .call_static_method(
+            &class,
+            "lastError",
+            "(I)Ljava/lang/String;",
+            &[JValue::Int(handle)],
+        )
         .and_then(|v| v.l());
     let obj = match jvm::check(&mut env, r, "UsbSerial.lastError") {
         Ok(obj) => obj,
@@ -146,7 +160,7 @@ impl SerialConnection {
         let handle = jvm::check(&mut env, r, "UsbSerial.open")?;
 
         if handle < 0 {
-            let reason = last_error();
+            let reason = last_error(NO_HANDLE);
             log::warn!("[usb-serial] open {port_name} failed: {reason}");
             return Err(format!("Failed to open {port_name}: {reason}"));
         }
@@ -189,7 +203,7 @@ impl SerialConnection {
         if ok {
             Ok(())
         } else {
-            Err(last_error())
+            Err(last_error(self.handle))
         }
     }
 }
@@ -284,7 +298,7 @@ impl ByteTransport for SerialConnection {
         } else {
             Err(TransportError::Io(format!(
                 "Serial write failed: {}",
-                last_error()
+                last_error(self.handle)
             )))
         }
     }

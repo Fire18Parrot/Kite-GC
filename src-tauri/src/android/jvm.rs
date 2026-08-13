@@ -100,9 +100,12 @@ fn class_loader(env: &mut JNIEnv) -> Result<&'static GlobalRef, String> {
     let r = env.new_global_ref(loader);
     let loader = check(env, r, "pinning the app class loader")?;
 
-    // `std::mem::forget` on the JObject is not needed: `activity` is a borrowed raw handle we never
-    // free, and dropping the local `JObject` wrapper does not release the underlying global ref.
-    std::mem::forget(activity);
+    // `activity` needs no cleanup and no `mem::forget`. In jni 0.21 `JObject` is a plain wrapper over
+    // the raw handle with no `Drop` impl — releasing a reference is explicit (`AutoLocal`,
+    // `delete_local_ref`, a local frame), so simply letting it fall out of scope releases nothing.
+    // Which is what we want: the handle belongs to `ndk_context`, which keeps the Activity alive as a
+    // global ref for the life of the process, and freeing it here would be a double-free of someone
+    // else's reference.
 
     Ok(CLASS_LOADER.get_or_init(|| loader))
 }

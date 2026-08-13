@@ -56,9 +56,23 @@ object UsbSerial {
     private val handles = ConcurrentHashMap<Int, SerialDriver>()
     private val nextHandle = AtomicInteger(1)
 
-    /** Named apart from the `lastError()` accessor below so neither shadows the other. */
-    @Volatile
-    private var lastErrorMessage: String = ""
+    /**
+     * The reason each handle's most recent call failed, keyed by handle.
+     *
+     * Per handle, not one global string: Kite can hold several links at once — a flight controller on
+     * USB while a SiK radio is on a second port — and each is driven by its own Rust thread. With a
+     * single slot, a write failing on one link between another link's failed call and its `lastError`
+     * fetch would hand the second thread the first one's message, which is the kind of bug that only
+     * shows up as an inexplicable error string in someone's log.
+     *
+     * [NO_HANDLE] is the slot for failures that happen before a handle exists ([open], [listDevices])
+     * or when the handle itself is the thing that was invalid. Those are inherently global, but they
+     * are also the calls Rust makes one at a time from the connection command.
+     */
+    private val lastErrors = ConcurrentHashMap<Int, String>()
+
+    /** Key in [lastErrors] for calls that have no handle yet. Handles start at 1, so 0 is free. */
+    private const val NO_HANDLE = 0
 
     /**
      * Must be called before Tauri starts (see `MainActivity.onCreate`) — the Rust side has no Context
@@ -69,9 +83,15 @@ object UsbSerial {
         appContext = context.applicationContext
     }
 
-    /** The reason the most recent call failed. Fetched by Rust only after a call reports failure. */
+    /**
+     * The reason [handle]'s most recent call failed. Fetched by Rust only after a call reports
+     * failure. Pass [NO_HANDLE] (0) for [open] / [listDevices], which have no handle of their own.
+     *
+     * Reading clears the slot, so a stale message can never be reported against a later, unrelated
+     * failure that somehow left nothing behind.
+     */
     @JvmStatic
-    fun lastError(): String = lastErrorMessage
+    fun lastError(handle: Int): String = lastErrors.remove(handle) ?: ""
 
     /**
      * Connectable devices as a JSON array of `{path, label, type}` — the same shape the desktop
@@ -115,17 +135,17 @@ object UsbSerial {
      */
     @JvmStatic
     fun open(deviceName: String, baud: Int): Int {
-        val manager = usbManager() ?: return fail("USB service unavailable")
+        val manager = usbManager() ?: return fail(NO_HANDLE, "USB service unavailable")
         val device = manager.deviceList[deviceName]
-            ?: return fail("USB device $deviceName is no longer connected")
+            ?: return fail(NO_HANDLE, "USB device $deviceName is no longer connected")
 
         if (!manager.hasPermission(device) && !requestPermission(manager, device)) {
-            return fail("USB permission denied for $deviceName")
+            return fail(NO_HANDLE, "USB permission denied for $deviceName")
         }
 
-        val kind = driverKindFor(device) ?: return fail("Unsupported USB device $deviceName")
+        val kind = driverKindFor(device) ?: return fail(NO_HANDLE, "Unsupported USB device $deviceName")
         val connection = manager.openDevice(device)
-            ?: return fail("Could not open $deviceName (already claimed by another app?)")
+            ?: return fail(NO_HANDLE, "Could not open $deviceName (already claimed by another app?)")
 
         val driver = when (kind) {
             DriverKind.CDC_ACM -> CdcAcmDriver(device, connection)
@@ -136,7 +156,7 @@ object UsbSerial {
             driver.open(baud)
         } catch (e: Exception) {
             connection.close()
-            return fail("Failed to configure $deviceName: ${e.message}")
+            return fail(NO_HANDLE, "Failed to configure $deviceName: ${e.message}")
         }
 
         val handle = nextHandle.getAndIncrement()
@@ -151,10 +171,10 @@ object UsbSerial {
      */
     @JvmStatic
     fun read(handle: Int, buf: ByteArray, timeoutMs: Int): Int {
-        val driver = handles[handle] ?: return fail("Invalid serial handle $handle")
+        val driver = handles[handle] ?: return fail(NO_HANDLE, "Invalid serial handle $handle")
         return when (val n = driver.read(buf, timeoutMs)) {
             ERR_TIMEOUT -> 0
-            ERR_DISCONNECTED -> fail("USB device disconnected")
+            ERR_DISCONNECTED -> fail(handle, "USB device disconnected")
             else -> n
         }
     }
@@ -164,14 +184,14 @@ object UsbSerial {
     fun write(handle: Int, data: ByteArray, timeoutMs: Int): Boolean {
         val driver = handles[handle]
         if (driver == null) {
-            lastErrorMessage = "Invalid serial handle $handle"
+            lastErrors[NO_HANDLE] = "Invalid serial handle $handle"
             return false
         }
         return try {
             driver.write(data, timeoutMs)
             true
         } catch (e: Exception) {
-            lastErrorMessage = "USB write failed: ${e.message}"
+            lastErrors[handle] = "USB write failed: ${e.message}"
             false
         }
     }
@@ -188,7 +208,7 @@ object UsbSerial {
             driver.setControlLines(dtr, rts)
             true
         } catch (e: Exception) {
-            lastErrorMessage = "Setting DTR/RTS failed: ${e.message}"
+            lastErrors[handle] = "Setting DTR/RTS failed: ${e.message}"
             false
         }
     }
@@ -196,6 +216,7 @@ object UsbSerial {
     /** Close and forget the handle. Safe to call on an already-closed or unknown handle. */
     @JvmStatic
     fun close(handle: Int) {
+        lastErrors.remove(handle)
         handles.remove(handle)?.let {
             try {
                 it.close()
@@ -209,14 +230,14 @@ object UsbSerial {
 
     private fun usbManager(): UsbManager? {
         if (!::appContext.isInitialized) {
-            lastErrorMessage = "UsbSerial.init() was never called"
+            lastErrors[NO_HANDLE] = "UsbSerial.init() was never called"
             return null
         }
         return appContext.getSystemService(Context.USB_SERVICE) as? UsbManager
     }
 
-    private fun fail(message: String): Int {
-        lastErrorMessage = message
+    private fun fail(handle: Int, message: String): Int {
+        lastErrors[handle] = message
         return -1
     }
 
@@ -277,8 +298,19 @@ object UsbSerial {
     /** Silicon Labs. Every CP2102/CP2104/CP2105 shares this vendor id. */
     private const val VENDOR_SILABS = 0x10C4
 
+    /**
+     * Pick a driver from the descriptors, CDC first.
+     *
+     * The vendor check is the *fallback*, not the first test. Silicon Labs' newer parts (CP2102N in
+     * its CDC configuration, and the EFM32/EFR32 boards that reuse the vendor id) enumerate as
+     * standard CDC-ACM while still reporting vendor 0x10C4. Matching the vendor first would send
+     * those down the CP210x path, where the vendor control transfers they do not implement fail and
+     * `open` reports "control transfer 0x00 failed" for a device that plain CDC would have driven
+     * without trouble. Descriptors are authoritative; the vendor id is only a hint, and it is only
+     * needed for the classic CP210x parts, which declare a vendor-specific class and so match nothing
+     * above.
+     */
     private fun driverKindFor(device: UsbDevice): DriverKind? {
-        if (device.vendorId == VENDOR_SILABS) return DriverKind.CP210X
         if (device.deviceClass == UsbConstants.USB_CLASS_COMM) return DriverKind.CDC_ACM
         // Composite devices report class 0 at the device level and declare the real class per
         // interface — which is what a flight controller exposing CDC alongside MSC/DFU looks like.
@@ -287,6 +319,7 @@ object UsbSerial {
                 return DriverKind.CDC_ACM
             }
         }
+        if (device.vendorId == VENDOR_SILABS) return DriverKind.CP210X
         return null
     }
 
