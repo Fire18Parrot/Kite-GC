@@ -1280,11 +1280,38 @@
     }
   }
 
+  /** The INAV blackbox formats, which are the only ones that need the external `blackbox_decode`.
+   *  Everything else the importer accepts (.kflight archives, .rawmsp, .tlog, ArduPilot .bin) is
+   *  parsed in-process by the Rust backend and works on every platform. */
+  const BLACKBOX_EXTS = /\.(txt|bbl|bfl)$/i;
+  /** Extensions offered in the file picker / accepted from a drop. Mobile drops the three blackbox
+   *  ones: `blackbox_decode` is a separate native executable Kite downloads into its own app-data
+   *  directory, and Android has forbidden executing a file from writable app storage since API 29
+   *  (W^X). That is a platform rule, not a missing port, so there is nothing to offer and nothing to
+   *  fall back to. The rest of the Logbook — recording, browsing, replay, export, and importing a
+   *  .kflight from a desktop — is unaffected, which is why only these three are removed. */
+  const IMPORT_EXTS = isMobile
+    ? ['bin', 'kflight', 'rawmsp', 'tlog']
+    : ['txt', 'bbl', 'bfl', 'bin', 'kflight', 'rawmsp', 'tlog'];
+
   /** Import a batch of files, isolating each so one bad/corrupt/non-log file doesn't abort the rest;
    *  failures (with the per-importer reason) are collected and surfaced together. */
   async function importFiles(files: string[]) {
+    // Second line of defence for the mobile case above: the picker no longer offers these, but a file
+    // can still arrive by another route (a drop, or a picker that ignores the filter). Say why rather
+    // than letting it fail somewhere in the decoder lookup.
+    if (isMobile) {
+      const rejected = files.filter((f) => BLACKBOX_EXTS.test(f));
+      files = files.filter((f) => !BLACKBOX_EXTS.test(f));
+      if (rejected.length > 0) {
+        errorMsg = $t('logbook.blackboxUnsupportedMobile', {
+          values: { files: rejected.map(baseName).join(', ') },
+        });
+      }
+      if (files.length === 0) return;
+    }
     // INAV blackbox text logs (.txt/.bbl/.bfl) need blackbox_decode — ensure it once before the batch.
-    if (files.some((f) => /\.(txt|bbl|bfl)$/i.test(f)) && !(await ensureBlackboxDecoder())) {
+    if (files.some((f) => BLACKBOX_EXTS.test(f)) && !(await ensureBlackboxDecoder())) {
       return;
     }
     blackboxImporting = true;
@@ -1313,7 +1340,7 @@
         filters: [
           {
             name: $t('logbook.allLogsFilter'),
-            extensions: ['txt', 'bbl', 'bfl', 'bin', 'kflight', 'rawmsp', 'tlog'],
+            extensions: IMPORT_EXTS,
           },
         ],
       });
@@ -1336,7 +1363,9 @@
 
     console.log('[IMPORT] importDroppedFiles called with', paths.length, 'files');
 
-    const supported = paths.filter((p) => /\.(txt|bbl|bfl|bin|kflight|rawmsp|tlog)$/i.test(p));
+    const supported = paths.filter((p) =>
+      new RegExp(`\\.(${IMPORT_EXTS.join('|')})$`, 'i').test(p),
+    );
     if (supported.length === 0) return;
     await importFiles(supported);
   }

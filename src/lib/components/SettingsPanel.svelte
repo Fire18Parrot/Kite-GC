@@ -19,6 +19,7 @@
   import type { AppSettings, InterfaceSettings, RadarSettings, GcsMode, AirspaceSettings, AirspaceProvider, SystemMessagesLevel, LogLevel, RcControlSettings, UpdateCheckSettings, UpdateCheckMode } from '$lib/stores/settings';
   import { revealItemInDir, openPath } from '@tauri-apps/plugin-opener';
   import { blackboxDecoderVersion, downloadBlackboxDecode } from '$lib/stores/flightlog';
+  import { isMobile } from '$lib/platform';
   import type { TileCacheStats } from '$lib/cache/tileCache';
   import NumberStepper from '$lib/components/NumberStepper.svelte';
   import UnitStepper from '$lib/components/UnitStepper.svelte';
@@ -223,7 +224,7 @@
   $effect(() => {
     if (tab !== 'interface') {
       void loadTerrainCache();
-      void loadBbVersion();
+      if (!isMobile) void loadBbVersion(); // its row is hidden there — see below
     }
   });
 
@@ -637,16 +638,22 @@
           <Button variant="standard" size="sm" onclick={onResetRawLogPath}>{$t('settings.useDefault')}</Button>
         </div>
       </div>
-      <div class="s-row s-row-stack">
-        <span class="s-label">{$t('settings.blackboxDecoder')}</span>
-        <div class="path-picker-row">
-          <span class="s-readout">{bbVersion ?? $t('settings.bbDecoderMissing')}</span>
-          <Button variant="standard" size="sm" disabled={bbBusy} onclick={updateBbDecoder}>
-            {bbBusy ? $t('settings.bbDecoderBusy') : bbVersion ? $t('settings.bbDecoderUpdate') : $t('settings.bbDecoderDownload')}
-          </Button>
+      <!-- Desktop only, matching the Logbook's Import button: `blackbox_decode` is a separate native
+           executable downloaded into app-data, and Android has forbidden executing a file from
+           writable app storage since API 29. There is no version to report and nothing useful to
+           download, so the row is hidden rather than shown permanently broken. -->
+      {#if !isMobile}
+        <div class="s-row s-row-stack">
+          <span class="s-label">{$t('settings.blackboxDecoder')}</span>
+          <div class="path-picker-row">
+            <span class="s-readout">{bbVersion ?? $t('settings.bbDecoderMissing')}</span>
+            <Button variant="standard" size="sm" disabled={bbBusy} onclick={updateBbDecoder}>
+              {bbBusy ? $t('settings.bbDecoderBusy') : bbVersion ? $t('settings.bbDecoderUpdate') : $t('settings.bbDecoderDownload')}
+            </Button>
+          </div>
+          {#if bbError}<span class="s-err">{bbError}</span>{/if}
         </div>
-        {#if bbError}<span class="s-err">{bbError}</span>{/if}
-      </div>
+      {/if}
     </div>
 
     <!-- ── Diagnostics ───────────────────────────────── -->

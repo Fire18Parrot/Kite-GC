@@ -942,6 +942,7 @@
     "importKflight": "Importer .kflight",
     "decoderMissingTitle": "blackbox_decode introuvable",
     "decoderMissingMsg": "Les journaux Blackbox INAV nécessitent l'outil externe « blackbox_decode », qui n'est pas installé. Le télécharger automatiquement depuis les releases officielles iNavFlight ?",
+    "blackboxUnsupportedMobile": "Les journaux Blackbox (.txt/.bbl/.bfl) ne peuvent pas être importés sous Android : ils nécessitent l'outil externe blackbox_decode, et Android n'autorise pas l'exécution d'un binaire téléchargé. Ignorés : {files}",
     "decoderDownload": "Télécharger",
     "decoderDownloadFailed": "Impossible de télécharger blackbox_decode : {error}",
     "kflightFileFilter": "Fichiers de vol KiteGC",

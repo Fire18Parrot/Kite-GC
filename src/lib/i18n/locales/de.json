@@ -997,6 +997,7 @@
     "importErrors": "Einige Dateien konnten nicht importiert werden:\n{errors}",
     "decoderMissingTitle": "blackbox_decode nicht gefunden",
     "decoderMissingMsg": "INAV-Blackbox-Logs benötigen das externe Tool 'blackbox_decode', das nicht installiert ist. Automatisch von den offiziellen iNavFlight-Releases herunterladen?",
+    "blackboxUnsupportedMobile": "Blackbox-Logs (.txt/.bbl/.bfl) können unter Android nicht importiert werden: sie benötigen das externe Werkzeug blackbox_decode, und Android erlaubt es nicht, eine heruntergeladene ausführbare Datei zu starten. Übersprungen: {files}",
     "decoderDownload": "Herunterladen",
     "decoderDownloadFailed": "blackbox_decode konnte nicht heruntergeladen werden: {error}",
     "kflightFileFilter": "KiteGC-Flugdateien",

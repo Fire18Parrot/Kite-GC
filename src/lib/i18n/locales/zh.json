@@ -997,6 +997,7 @@
     "importErrors": "部分文件无法导入：\n{errors}",
     "decoderMissingTitle": "未找到 blackbox_decode",
     "decoderMissingMsg": "INAV黑盒子日志需要外部工具 'blackbox_decode'，但未安装。是否从官方iNavFlight发布版自动下载？",
+    "blackboxUnsupportedMobile": "黑盒子日志 (.txt/.bbl/.bfl) 无法在 Android 上导入：它们需要外部的 blackbox_decode 工具，而 Android 不允许运行下载的可执行文件。已跳过：{files}",
     "decoderDownload": "下载",
     "decoderDownloadFailed": "无法下载 blackbox_decode：{error}",
     "kflightFileFilter": "KiteGC 飞行文件",
