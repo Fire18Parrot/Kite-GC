@@ -511,6 +511,7 @@
   let cesiumIonToken = $state("");
   let altitudeCurtain3D = $state(true);
   let realLighting3D = $state(false);
+  let buildings3D = $state(false);
   let logReplayTime = $state(false);
   let nightMode2D = $state<'off' | 'auto' | 'on'>('off');
   let gcsMode = $state<GcsMode>('manual');
@@ -735,6 +736,7 @@
   cesiumIonToken = saved.cesiumIonToken ?? '';
   altitudeCurtain3D = saved.altitudeCurtain3D ?? true;
   realLighting3D = saved.realLighting3D ?? false;
+  buildings3D = saved.buildings3D ?? false;
   logReplayTime = saved.logReplayTime ?? false;
   nightMode2D = saved.nightMode2D ?? 'off';
   gcsMode = saved.gcsMode ?? 'manual';
@@ -1006,6 +1008,7 @@
     if (patch.cesiumIonToken != null) cesiumIonToken = patch.cesiumIonToken;
     if (patch.altitudeCurtain3D != null) altitudeCurtain3D = patch.altitudeCurtain3D;
     if (patch.realLighting3D != null) realLighting3D = patch.realLighting3D;
+    if (patch.buildings3D != null) buildings3D = patch.buildings3D;
     if (patch.logReplayTime != null) logReplayTime = patch.logReplayTime;
     if (patch.nightMode2D != null) nightMode2D = patch.nightMode2D;
     if (patch.gcsMode != null) gcsMode = patch.gcsMode;
@@ -2685,6 +2688,7 @@
         {cesiumIonToken}
         {altitudeCurtain3D}
         {realLighting3D}
+        {buildings3D}
         {logReplayTime}
         {nightMode2D}
         lowPower3D={$settings.lowPower3D}
